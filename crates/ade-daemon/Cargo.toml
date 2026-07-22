@@ -1,0 +1,21 @@
+[package]
+name = "ade-daemon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+ade-core.workspace = true
+ade-protocol.workspace = true
+ade-pty.workspace = true
+ade-storage.workspace = true
+crossbeam-channel.workspace = true
+thiserror.workspace = true
+url.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows.workspace = true
+
+[lints]
+workspace = true

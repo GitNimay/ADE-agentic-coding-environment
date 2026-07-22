@@ -1,0 +1,6 @@
+/target/
+/.idea/
+/.vscode/
+*.pdb
+*.ilk
+*.log

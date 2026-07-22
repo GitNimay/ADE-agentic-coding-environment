@@ -1,0 +1,20 @@
+[package]
+name = "ade-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+ade-core.workspace = true
+ade-daemon.workspace = true
+ade-protocol.workspace = true
+arboard.workspace = true
+crossbeam-channel.workspace = true
+eframe.workspace = true
+rfd.workspace = true
+vt100.workspace = true
+windows.workspace = true
+
+[lints]
+workspace = true
