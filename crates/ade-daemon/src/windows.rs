@@ -35,7 +35,7 @@ use crate::{DaemonError, DaemonState, StateAction, load_state};
 const OUTPUT_LIMIT: usize = 8 * 1024 * 1024;
 const CLIENT_EVENT_CAPACITY: usize = 256;
 const PIPE_BUFFER_SIZE: u32 = 64 * 1024;
-const POWERSHELL_CWD_HOOK: &str = r#"$global:__ade_original_prompt=$function:prompt; function global:prompt { $uri=([uri](Get-Location).ProviderPath).AbsoluteUri; [Console]::Write("$([char]27)]7;$uri$([char]7)"); & $global:__ade_original_prompt }"#;
+const POWERSHELL_PROMPT_HOOK: &str = r#"$global:__ade_original_prompt=$function:prompt; function global:prompt { $uri=([uri](Get-Location).ProviderPath).AbsoluteUri; [Console]::Write("$([char]27)]7;$uri$([char]7)"); [Console]::Write("$([char]27)[8m__ADE_BLOCK_DIVIDER__$([char]27)[0m`r`n"); & $global:__ade_original_prompt }"#;
 const OSC_BUFFER_LIMIT: usize = 8192;
 
 struct RuntimeSession {
@@ -441,7 +441,7 @@ fn spawn_pane(shared: &Arc<Shared>, pane_id: PaneId) -> Result<(), DaemonError> 
     if shell_name.eq_ignore_ascii_case("pwsh.exe")
         || shell_name.eq_ignore_ascii_case("powershell.exe")
     {
-        command = command.arguments(["-NoExit", "-Command", POWERSHELL_CWD_HOOK]);
+        command = command.arguments(["-NoExit", "-Command", POWERSHELL_PROMPT_HOOK]);
     }
     let mut session = match ConPtySession::spawn(&command, size) {
         Ok(session) => session,

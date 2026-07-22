@@ -26,17 +26,19 @@ use windows::Win32::System::Pipes::PeekNamedPipe;
 
 const SCROLLBACK_LINES: usize = 10_000;
 const TERMINAL_FONT_SIZE: f32 = 14.0;
-const PANE_HEADER_HEIGHT: f32 = 28.0;
 const DIVIDER_SIZE: f32 = 6.0;
 const MIN_PANE_WIDTH: f32 = 220.0;
 const MIN_PANE_HEIGHT: f32 = 120.0;
 const TERMINAL_SIDE_PADDING: f32 = 10.0;
 const TERMINAL_BOTTOM_PADDING: f32 = 10.0;
+const TERMINAL_DIVIDER_MARKER: &str = "__ADE_BLOCK_DIVIDER__";
+const TERMINAL_DIVIDER_OFFSET: f32 = 7.0;
 const SIDEBAR_BREAKPOINT: f32 = 600.0;
 const SIDEBAR_WIDTH: f32 = 256.0;
 const TABLET_SIDEBAR_WIDTH: f32 = 224.0;
 const SIDEBAR_ROW_HEIGHT: f32 = 40.0;
 const COLLAPSED_SIDEBAR_WIDTH: f32 = 56.0;
+const WINDOW_TITLE_BAR_HEIGHT: f32 = 36.0;
 const SIDEBAR_TRIGGER_WIDTH: f32 = 16.0;
 const SIDEBAR_OPEN_DELAY: Duration = Duration::from_millis(180);
 const SIDEBAR_CLOSE_DELAY: Duration = Duration::from_millis(450);
@@ -53,9 +55,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
         viewport: egui::ViewportBuilder::default()
-            .with_title("ADE")
+            .with_title("")
             .with_inner_size([1280.0, 800.0])
-            .with_min_inner_size([480.0, 360.0]),
+            .with_min_inner_size([480.0, 360.0])
+            .with_decorations(false)
+            .with_maximized(true),
         ..Default::default()
     };
 
@@ -540,17 +544,19 @@ impl AdeApp {
                         self.active_workspace,
                         &mut action,
                         &mut context_menu_open,
+                        &mut create_workspace,
                     );
                     return;
                 }
-                let (header_rect, _) =
-                    ui.allocate_exact_size(Vec2::new(ui.available_width(), 48.0), Sense::hover());
+                let (header_rect, _) = ui.allocate_exact_size(
+                    Vec2::new(ui.available_width(), WINDOW_TITLE_BAR_HEIGHT),
+                    Sense::hover(),
+                );
                 let mut header = ui.new_child(
                     egui::UiBuilder::new()
-                        .max_rect(header_rect.shrink2(Vec2::new(12.0, 8.0)))
+                        .max_rect(header_rect.shrink2(Vec2::new(12.0, 2.0)))
                         .layout(egui::Layout::left_to_right(egui::Align::Center)),
                 );
-                paint_app_mark(&mut header, 24.0);
                 header.label(
                     RichText::new("Workspaces")
                         .size(13.0)
@@ -565,12 +571,6 @@ impl AdeApp {
                         create_workspace = true;
                     }
                 });
-                ui.painter().hline(
-                    header_rect.x_range(),
-                    header_rect.bottom(),
-                    Stroke::new(1.0, border()),
-                );
-
                 egui::Frame::NONE
                     .inner_margin(egui::Margin {
                         left: 8,
@@ -888,7 +888,14 @@ impl eframe::App for AdeApp {
         let context = ui.ctx().clone();
         self.drain_daemon_events(&context);
         self.handle_shortcuts(&context);
-        self.sidebar(ui, &context);
+        let compact = ui.available_width() <= SIDEBAR_BREAKPOINT;
+        if compact {
+            window_title_bar(ui, &context);
+            self.sidebar(ui, &context);
+        } else {
+            self.sidebar(ui, &context);
+            window_title_bar(ui, &context);
+        }
 
         let requests = self.client.as_ref().map(|client| client.requests.clone());
         let terminal_input_enabled = !self.palette_open && self.rename_workspace.is_none();
@@ -938,6 +945,139 @@ impl eframe::App for AdeApp {
         self.command_palette(&context);
         context.request_repaint_after(Duration::from_millis(33));
     }
+}
+
+#[derive(Clone, Copy)]
+enum WindowControl {
+    Minimize,
+    Maximize,
+    Close,
+}
+
+fn window_title_bar(root_ui: &mut egui::Ui, context: &egui::Context) {
+    let maximized = context.input(|input| input.viewport().maximized.unwrap_or(false));
+    let panel = egui::Panel::top("window-title-bar")
+        .exact_size(WINDOW_TITLE_BAR_HEIGHT)
+        .frame(egui::Frame::NONE.fill(surface_primary()))
+        .show(root_ui, |ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if window_control_button(ui, WindowControl::Close, maximized).clicked() {
+                    context.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+                if window_control_button(ui, WindowControl::Maximize, maximized).clicked() {
+                    context.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+                }
+                if window_control_button(ui, WindowControl::Minimize, maximized).clicked() {
+                    context.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                }
+
+                let drag_rect = ui.available_rect_before_wrap();
+                let drag = ui.interact(
+                    drag_rect,
+                    egui::Id::new("window-title-drag-region"),
+                    Sense::click_and_drag(),
+                );
+                if drag.double_clicked() {
+                    context.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+                } else if drag.drag_started() {
+                    context.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                }
+            });
+        });
+    let app_rect = context.content_rect();
+    let divider_height = 1.0 / context.pixels_per_point();
+    let painter = context.layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::new("window-title-bar-borders"),
+    ));
+    painter.rect_filled(
+        egui::Rect::from_min_size(
+            egui::pos2(app_rect.left(), panel.response.rect.top()),
+            Vec2::new(app_rect.width(), divider_height),
+        ),
+        0.0,
+        border(),
+    );
+    painter.rect_filled(
+        egui::Rect::from_min_size(
+            egui::pos2(
+                app_rect.left(),
+                panel.response.rect.bottom() - divider_height,
+            ),
+            Vec2::new(app_rect.width(), divider_height),
+        ),
+        0.0,
+        border(),
+    );
+}
+
+fn window_control_button(
+    ui: &mut egui::Ui,
+    control: WindowControl,
+    maximized: bool,
+) -> egui::Response {
+    let label = match control {
+        WindowControl::Minimize => "Minimize",
+        WindowControl::Maximize if maximized => "Restore",
+        WindowControl::Maximize => "Maximize",
+        WindowControl::Close => "Close",
+    };
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(46.0, 36.0), Sense::click());
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
+    });
+    if response.hovered() || response.has_focus() {
+        ui.painter().rect_filled(
+            rect,
+            0.0,
+            if matches!(control, WindowControl::Close) {
+                Color32::from_rgb(196, 43, 28)
+            } else {
+                surface_hover()
+            },
+        );
+    }
+
+    let center = rect.center();
+    let stroke = Stroke::new(1.0, text_primary());
+    match control {
+        WindowControl::Minimize => {
+            ui.painter().line_segment(
+                [center + Vec2::new(-5.0, 3.0), center + Vec2::new(5.0, 3.0)],
+                stroke,
+            );
+        }
+        WindowControl::Maximize if maximized => {
+            let back =
+                egui::Rect::from_center_size(center + Vec2::new(1.5, -1.5), Vec2::new(8.0, 7.0));
+            let front =
+                egui::Rect::from_center_size(center + Vec2::new(-1.5, 1.5), Vec2::new(8.0, 7.0));
+            ui.painter()
+                .rect_stroke(back, 0.0, stroke, egui::StrokeKind::Inside);
+            ui.painter().rect_filled(front, 0.0, surface_primary());
+            ui.painter()
+                .rect_stroke(front, 0.0, stroke, egui::StrokeKind::Inside);
+        }
+        WindowControl::Maximize => {
+            ui.painter().rect_stroke(
+                egui::Rect::from_center_size(center, Vec2::new(10.0, 9.0)),
+                0.0,
+                stroke,
+                egui::StrokeKind::Inside,
+            );
+        }
+        WindowControl::Close => {
+            ui.painter().line_segment(
+                [center - Vec2::splat(4.0), center + Vec2::splat(4.0)],
+                stroke,
+            );
+            ui.painter().line_segment(
+                [center + Vec2::new(-4.0, 4.0), center + Vec2::new(4.0, -4.0)],
+                stroke,
+            );
+        }
+    }
+    response
 }
 
 #[derive(Clone, Copy)]
@@ -993,13 +1133,21 @@ fn compact_sidebar_rail(
     active_workspace: usize,
     action: &mut Option<WorkspaceAction>,
     context_menu_open: &mut bool,
+    create_workspace: &mut bool,
 ) {
-    ui.add_space(12.0);
-    ui.vertical_centered(|ui| {
-        paint_app_mark(ui, 24.0).on_hover_text("ADE");
-    });
-    ui.add_space(12.0);
-    ui.separator();
+    let (header_rect, _) = ui.allocate_exact_size(
+        Vec2::new(ui.available_width(), WINDOW_TITLE_BAR_HEIGHT),
+        Sense::hover(),
+    );
+    let mut header = ui.new_child(egui::UiBuilder::new().max_rect(header_rect).layout(
+        egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+    ));
+    if compact_icon_button(&mut header, "+", "New workspace")
+        .on_hover_text("New workspace")
+        .clicked()
+    {
+        *create_workspace = true;
+    }
     ui.add_space(6.0);
 
     for (index, workspace) in workspaces.iter().enumerate() {
@@ -1015,25 +1163,6 @@ fn compact_sidebar_rail(
     }
 }
 
-fn paint_app_mark(ui: &mut egui::Ui, size: f32) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
-    ui.painter().rect(
-        rect,
-        6.0,
-        Color32::from_rgb(10, 10, 10),
-        Stroke::new(1.0, border_hover()),
-        egui::StrokeKind::Inside,
-    );
-    ui.painter().text(
-        rect.center(),
-        egui::Align2::CENTER_CENTER,
-        ">_",
-        FontId::monospace(size * 0.38),
-        text_primary(),
-    );
-    response
-}
-
 fn compact_workspace_item(
     ui: &mut egui::Ui,
     workspace: &WorkspaceState,
@@ -1042,7 +1171,7 @@ fn compact_workspace_item(
     context_menu_open: &mut bool,
 ) -> Option<WorkspaceAction> {
     let (rect, response) =
-        ui.allocate_exact_size(Vec2::new(ui.available_width(), 50.0), Sense::click());
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), 54.0), Sense::click());
     response.widget_info(|| {
         egui::WidgetInfo::selected(
             egui::WidgetType::SelectableLabel,
@@ -1053,11 +1182,12 @@ fn compact_workspace_item(
     });
 
     if active || response.hovered() || response.context_menu_opened() {
+        let selection_rect = egui::Rect::from_center_size(rect.center(), Vec2::new(40.0, 48.0));
         ui.painter().rect_filled(
-            rect.shrink2(Vec2::new(8.0, 2.0)),
-            6.0,
+            selection_rect,
+            7.0,
             if active {
-                surface_active()
+                Color32::from_rgb(20, 20, 20)
             } else {
                 surface_hover()
             },
@@ -1066,7 +1196,7 @@ fn compact_workspace_item(
 
     let icon_rect = egui::Rect::from_center_size(
         egui::pos2(rect.center().x, rect.top() + 17.0),
-        Vec2::splat(24.0),
+        Vec2::splat(22.0),
     );
     paint_workspace_icon(ui, icon_rect, workspace);
     ui.painter().text(
@@ -1099,8 +1229,14 @@ fn compact_workspace_item(
 }
 
 fn paint_workspace_icon(ui: &egui::Ui, rect: egui::Rect, workspace: &WorkspaceState) {
-    ui.painter()
-        .rect_filled(rect, 6.0, workspace_identity_color(workspace.model.id));
+    let (background, foreground) = workspace_identity_colors(workspace.model.id);
+    ui.painter().rect_filled(rect, 6.0, background);
+    ui.painter().rect_stroke(
+        rect,
+        6.0,
+        Stroke::new(1.0, foreground.gamma_multiply(0.18)),
+        egui::StrokeKind::Inside,
+    );
     let initial = workspace
         .model
         .name
@@ -1112,31 +1248,35 @@ fn paint_workspace_icon(ui: &egui::Ui, rect: egui::Rect, workspace: &WorkspaceSt
         egui::Align2::CENTER_CENTER,
         initial,
         FontId::proportional(11.0),
-        Color32::WHITE,
+        foreground,
     );
     if workspace.any_running() {
-        ui.painter().circle_filled(
-            egui::pos2(rect.right() - 1.0, rect.bottom() - 1.0),
-            3.0,
-            Color32::from_rgb(0x10, 0x7d, 0x32),
-        );
-        ui.painter().circle_stroke(
-            egui::pos2(rect.right() - 1.0, rect.bottom() - 1.0),
-            3.0,
-            Stroke::new(1.0, surface_primary()),
-        );
+        let status_center = egui::pos2(rect.right() - 3.0, rect.bottom() - 3.0);
+        ui.painter()
+            .circle_filled(status_center, 2.5, Color32::from_rgb(0x10, 0x7d, 0x32));
+        ui.painter()
+            .circle_stroke(status_center, 2.5, Stroke::new(1.0, surface_primary()));
     }
 }
 
-fn workspace_identity_color(workspace_id: ade_core::WorkspaceId) -> Color32 {
-    const VERCEL_COLORS: [(u8, u8, u8); 7] = [
-        (0x00, 0x59, 0xec),
-        (0xea, 0x00, 0x1d),
-        (0xaa, 0x4d, 0x00),
-        (0x10, 0x7d, 0x32),
-        (0x00, 0x7f, 0x70),
-        (0x85, 0x00, 0xd1),
-        (0xc4, 0x15, 0x62),
+fn workspace_identity_colors(workspace_id: ade_core::WorkspaceId) -> (Color32, Color32) {
+    const BACKGROUNDS: [(u8, u8, u8); 7] = [
+        (0x00, 0x2f, 0x62),
+        (0x5d, 0x0e, 0x17),
+        (0x50, 0x28, 0x00),
+        (0x00, 0x3a, 0x0e),
+        (0x00, 0x3d, 0x34),
+        (0x47, 0x18, 0x5e),
+        (0x57, 0x10, 0x32),
+    ];
+    const FOREGROUNDS: [(u8, u8, u8); 7] = [
+        (0xea, 0xf6, 0xff),
+        (0xff, 0xe9, 0xed),
+        (0xff, 0xf3, 0xd5),
+        (0xd8, 0xff, 0xe4),
+        (0xcb, 0xff, 0xf5),
+        (0xfb, 0xec, 0xff),
+        (0xff, 0xe9, 0xf4),
     ];
     let hash = workspace_id
         .to_string()
@@ -1144,8 +1284,13 @@ fn workspace_identity_color(workspace_id: ade_core::WorkspaceId) -> Color32 {
         .fold(2_166_136_261_u32, |hash, byte| {
             (hash ^ u32::from(byte)).wrapping_mul(16_777_619)
         });
-    let (red, green, blue) = VERCEL_COLORS[hash as usize % VERCEL_COLORS.len()];
-    Color32::from_rgb(red, green, blue)
+    let index = hash as usize % BACKGROUNDS.len();
+    let background = BACKGROUNDS[index];
+    let foreground = FOREGROUNDS[index];
+    (
+        Color32::from_rgb(background.0, background.1, background.2),
+        Color32::from_rgb(foreground.0, foreground.1, foreground.2),
+    )
 }
 
 fn workspace_row(
@@ -1159,6 +1304,11 @@ fn workspace_row(
         Vec2::new(ui.available_width(), SIDEBAR_ROW_HEIGHT),
         Sense::click(),
     );
+    let response = response.on_hover_text(format!(
+        "{}\n{}",
+        workspace.model.name,
+        workspace.model.root_directory.display()
+    ));
     response.widget_info(|| {
         egui::WidgetInfo::selected(
             egui::WidgetType::SelectableLabel,
@@ -1187,32 +1337,20 @@ fn workspace_row(
         egui::pos2(content.left() + 32.0, content.top()),
         content.max,
     );
-    let mut text_ui = ui.new_child(
-        egui::UiBuilder::new()
-            .max_rect(text_rect)
-            .layout(egui::Layout::top_down(egui::Align::LEFT)),
+    let painter = ui.painter().with_clip_rect(text_rect);
+    painter.text(
+        egui::pos2(text_rect.left(), text_rect.top() + 8.5),
+        egui::Align2::LEFT_CENTER,
+        &workspace.model.name,
+        FontId::proportional(12.5),
+        text_primary(),
     );
-    text_ui.spacing_mut().item_spacing.y = 0.0;
-    text_ui.add_sized(
-        [text_rect.width(), 17.0],
-        egui::Label::new(
-            RichText::new(&workspace.model.name)
-                .size(12.5)
-                .strong()
-                .color(text_primary()),
-        )
-        .halign(egui::Align::LEFT)
-        .truncate(),
-    );
-    text_ui.add_sized(
-        [text_rect.width(), 15.0],
-        egui::Label::new(
-            RichText::new(compact_path(&workspace.model.root_directory))
-                .size(10.0)
-                .color(text_secondary()),
-        )
-        .halign(egui::Align::LEFT)
-        .truncate(),
+    painter.text(
+        egui::pos2(text_rect.left(), text_rect.top() + 24.5),
+        egui::Align2::LEFT_CENTER,
+        compact_path(&workspace.model.root_directory),
+        FontId::proportional(10.0),
+        text_secondary(),
     );
 
     let mut action = if response.clicked() {
@@ -1309,8 +1447,6 @@ struct TerminalPane {
     status: SessionStatus,
     columns: u16,
     rows: u16,
-    cwd: PathBuf,
-    process_label: String,
     selection: Option<TerminalSelection>,
 }
 
@@ -1334,16 +1470,12 @@ impl TerminalPane {
             status: metadata.status.clone(),
             columns: metadata.cols,
             rows: metadata.rows,
-            cwd: metadata.cwd.clone(),
-            process_label: metadata.process_label.clone(),
             selection: None,
         }
     }
 
     fn update_metadata(&mut self, metadata: &PaneSnapshot) {
         self.status = metadata.status.clone();
-        self.cwd.clone_from(&metadata.cwd);
-        self.process_label.clone_from(&metadata.process_label);
     }
 
     fn process_output(&mut self, data: &[u8]) {
@@ -1373,7 +1505,8 @@ impl TerminalPane {
         Some(
             self.parser
                 .screen()
-                .contents_between(start.row, start.column, end.row, end_column),
+                .contents_between(start.row, start.column, end.row, end_column)
+                .replace(TERMINAL_DIVIDER_MARKER, ""),
         )
     }
 
@@ -1548,65 +1681,9 @@ fn terminal_pane_ui(
     accept_input: bool,
 ) {
     ui.painter().rect_filled(rect, 0.0, terminal_background());
-    let header_rect =
-        egui::Rect::from_min_size(rect.min, Vec2::new(rect.width(), PANE_HEADER_HEIGHT));
-    ui.painter()
-        .rect_filled(header_rect, 0.0, Color32::from_rgb(10, 10, 10));
-    ui.painter().hline(
-        header_rect.x_range(),
-        header_rect.bottom(),
-        Stroke::new(1.0, border()),
-    );
-    if active {
-        ui.painter().rect_filled(
-            egui::Rect::from_min_size(header_rect.min, Vec2::new(2.0, header_rect.height())),
-            0.0,
-            Color32::from_rgb(0, 110, 254),
-        );
-    }
-
-    let status_text = match &pane.status {
-        SessionStatus::Starting => "starting",
-        SessionStatus::Running => "running",
-        SessionStatus::Exited { .. } => "exited",
-        SessionStatus::FailedToStart { .. } => "error",
-    };
-    let title_clip = egui::Rect::from_min_max(
-        header_rect.min,
-        egui::pos2(
-            (header_rect.right() - 90.0).max(header_rect.left()),
-            header_rect.bottom(),
-        ),
-    );
-    ui.painter().with_clip_rect(title_clip).text(
-        header_rect.left_center() + Vec2::new(10.0, 0.0),
-        egui::Align2::LEFT_CENTER,
-        format!("{}  /  {}", pane.process_label, compact_path(&pane.cwd)),
-        FontId::proportional(11.5),
-        text_primary(),
-    );
-    let status_color = match &pane.status {
-        SessionStatus::Starting => Color32::from_rgb(245, 166, 35),
-        SessionStatus::Running => Color32::from_rgb(70, 167, 88),
-        SessionStatus::Exited { .. } => text_disabled(),
-        SessionStatus::FailedToStart { .. } => danger(),
-    };
-    ui.painter().circle_filled(
-        header_rect.right_center() - Vec2::new(13.0, 0.0),
-        3.0,
-        status_color,
-    );
-    ui.painter().text(
-        header_rect.right_center() - Vec2::new(23.0, 0.0),
-        egui::Align2::RIGHT_CENTER,
-        status_text,
-        FontId::proportional(10.5),
-        muted(),
-    );
-
     let content_min = egui::pos2(
         (rect.left() + TERMINAL_SIDE_PADDING).min(rect.right()),
-        (header_rect.bottom() + TERMINAL_BOTTOM_PADDING).min(rect.bottom()),
+        (rect.top() + TERMINAL_BOTTOM_PADDING).min(rect.bottom()),
     );
     let content_rect = egui::Rect::from_min_max(
         content_min,
@@ -1644,8 +1721,9 @@ fn terminal_pane_ui(
     );
 
     if bottom_anchored {
-        let dock_top =
-            (grid_origin.y + f32::from(cursor_row) * cell_height - 7.0).max(content_rect.top());
+        let dock_top = (grid_origin.y + f32::from(cursor_row) * cell_height
+            - TERMINAL_DIVIDER_OFFSET)
+            .max(content_rect.top());
         let dock_rect = egui::Rect::from_min_max(
             egui::pos2(rect.left(), dock_top),
             egui::pos2(rect.right(), rect.bottom()),
@@ -1655,7 +1733,7 @@ fn terminal_pane_ui(
         ui.painter().hline(
             dock_rect.x_range(),
             dock_rect.top(),
-            Stroke::new(1.0, border()),
+            Stroke::new(1.0 / pixels_per_point, border()),
         );
         if active {
             ui.painter().rect_filled(
@@ -1674,6 +1752,18 @@ fn terminal_pane_ui(
     ui.painter()
         .with_clip_rect(content_rect)
         .galley(grid_origin, galley, Color32::WHITE);
+    let divider_stroke = Stroke::new(1.0 / pixels_per_point, border());
+    let divider_painter = ui.painter().with_clip_rect(rect);
+    for row in terminal_divider_rows(screen) {
+        let y = snap_to_pixel(
+            grid_origin.y + f32::from(row.saturating_add(1)) * cell_height
+                - TERMINAL_DIVIDER_OFFSET,
+            pixels_per_point,
+        );
+        if (rect.top()..=rect.bottom()).contains(&y) {
+            divider_painter.hline(rect.x_range(), y, divider_stroke);
+        }
+    }
     let response = ui.interact(
         content_rect,
         egui::Id::new(("terminal-content", pane.id)),
@@ -1764,6 +1854,7 @@ fn terminal_layout_job(
     job.round_output_to_gui = false;
 
     for row in 0..rows {
+        let divider_row = is_terminal_divider_row(screen, row);
         for column in 0..columns {
             let Some(cell) = screen.cell(row, column) else {
                 continue;
@@ -1771,7 +1862,9 @@ fn terminal_layout_job(
             if cell.is_wide_continuation() {
                 continue;
             }
-            let text = if cell.has_contents() {
+            let text = if divider_row {
+                " "
+            } else if cell.has_contents() {
                 cell.contents()
             } else {
                 " "
@@ -1829,6 +1922,29 @@ fn terminal_layout_job(
         }
     }
     job
+}
+
+fn terminal_divider_rows(screen: &vt100::Screen) -> Vec<u16> {
+    let (rows, _) = screen.size();
+    (0..rows)
+        .filter(|&row| is_terminal_divider_row(screen, row))
+        .collect()
+}
+
+fn is_terminal_divider_row(screen: &vt100::Screen, row: u16) -> bool {
+    let (_, columns) = screen.size();
+    let marker_length = u16::try_from(TERMINAL_DIVIDER_MARKER.len()).unwrap_or(u16::MAX);
+    if columns < marker_length {
+        return false;
+    }
+    TERMINAL_DIVIDER_MARKER
+        .chars()
+        .enumerate()
+        .all(|(column, expected)| {
+            screen
+                .cell(row, u16::try_from(column).unwrap_or(u16::MAX))
+                .is_some_and(|cell| cell.contents() == expected.to_string())
+        })
 }
 
 fn forward_terminal_input(
@@ -2274,27 +2390,39 @@ mod tests {
     }
 
     #[test]
+    fn terminal_block_markers_become_divider_rows() {
+        let mut parser = vt100::Parser::new(6, 80, 100);
+        parser.process(
+            format!("output\r\n\x1b[8m{TERMINAL_DIVIDER_MARKER}\x1b[0m\r\nPS> ").as_bytes(),
+        );
+
+        assert_eq!(terminal_divider_rows(parser.screen()), vec![1]);
+        assert!(!is_terminal_divider_row(parser.screen(), 0));
+        assert!(!is_terminal_divider_row(parser.screen(), 2));
+    }
+
+    #[test]
     fn compact_text_preserves_short_names_and_truncates_long_ones() {
         assert_eq!(compact_text("workspace", 12), "workspace");
         assert_eq!(compact_text("a very long workspace", 12), "a very lo...");
     }
 
     #[test]
-    fn workspace_identity_color_is_stable_and_uses_vercel_palette() {
+    fn workspace_identity_colors_are_stable_and_use_vercel_palette() {
         let workspace_id = ade_core::WorkspaceId::new();
-        let color = workspace_identity_color(workspace_id);
-        assert_eq!(color, workspace_identity_color(workspace_id));
+        let colors = workspace_identity_colors(workspace_id);
+        assert_eq!(colors, workspace_identity_colors(workspace_id));
         assert!(
             [
-                Color32::from_rgb(0x00, 0x59, 0xec),
-                Color32::from_rgb(0xea, 0x00, 0x1d),
-                Color32::from_rgb(0xaa, 0x4d, 0x00),
-                Color32::from_rgb(0x10, 0x7d, 0x32),
-                Color32::from_rgb(0x00, 0x7f, 0x70),
-                Color32::from_rgb(0x85, 0x00, 0xd1),
-                Color32::from_rgb(0xc4, 0x15, 0x62),
+                Color32::from_rgb(0x00, 0x2f, 0x62),
+                Color32::from_rgb(0x5d, 0x0e, 0x17),
+                Color32::from_rgb(0x50, 0x28, 0x00),
+                Color32::from_rgb(0x00, 0x3a, 0x0e),
+                Color32::from_rgb(0x00, 0x3d, 0x34),
+                Color32::from_rgb(0x47, 0x18, 0x5e),
+                Color32::from_rgb(0x57, 0x10, 0x32),
             ]
-            .contains(&color)
+            .contains(&colors.0)
         );
     }
 
