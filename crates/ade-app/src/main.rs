@@ -36,6 +36,8 @@ const TERMINAL_SIDE_PADDING: f32 = 10.0;
 const TERMINAL_BOTTOM_PADDING: f32 = 10.0;
 const TERMINAL_DIVIDER_MARKER: &str = "__ADE_BLOCK_DIVIDER__";
 const TERMINAL_DIVIDER_OFFSET: f32 = 7.0;
+const TERMINAL_REVEAL_DURATION: Duration = Duration::from_millis(160);
+const TERMINAL_REVEAL_OFFSET: f32 = 4.0;
 const SIDEBAR_BREAKPOINT: f32 = 600.0;
 const SIDEBAR_WIDTH: f32 = 256.0;
 const TABLET_SIDEBAR_WIDTH: f32 = 224.0;
@@ -1904,6 +1906,7 @@ struct TerminalPane {
     columns: u16,
     rows: u16,
     selection: Option<TerminalSelection>,
+    reveal_started_at: Instant,
 }
 
 #[derive(Clone, Copy)]
@@ -1927,7 +1930,13 @@ impl TerminalPane {
             columns: metadata.cols,
             rows: metadata.rows,
             selection: None,
+            reveal_started_at: Instant::now(),
         }
+    }
+
+    fn reveal_progress(&self) -> f32 {
+        let elapsed = self.reveal_started_at.elapsed().as_secs_f32();
+        (elapsed / TERMINAL_REVEAL_DURATION.as_secs_f32()).clamp(0.0, 1.0)
     }
 
     fn update_metadata(&mut self, metadata: &PaneSnapshot) {
@@ -1996,9 +2005,19 @@ fn render_layout(
         LayoutNode::Empty => false,
         LayoutNode::Pane { pane_id } => {
             if let Some(pane) = panes.get_mut(pane_id) {
+                let reveal = egui::emath::easing::cubic_out(pane.reveal_progress());
+                if reveal < 1.0 {
+                    ui.ctx().request_repaint();
+                }
+                let visual_rect = rect.translate(Vec2::new(
+                    0.0,
+                    egui::lerp(TERMINAL_REVEAL_OFFSET..=0.0, reveal),
+                ));
+                let mut pane_ui = ui.new_child(egui::UiBuilder::new().max_rect(rect));
+                pane_ui.set_opacity(egui::lerp(0.72..=1.0, reveal));
                 terminal_pane_ui(
-                    ui,
-                    rect,
+                    &mut pane_ui,
+                    visual_rect,
                     pane,
                     Some(*pane_id) == *active_pane,
                     active_pane,
