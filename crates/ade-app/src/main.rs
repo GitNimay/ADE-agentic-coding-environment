@@ -34,6 +34,7 @@ const MIN_PANE_WIDTH: f32 = 220.0;
 const MIN_PANE_HEIGHT: f32 = 120.0;
 const TERMINAL_SIDE_PADDING: f32 = 10.0;
 const TERMINAL_BOTTOM_PADDING: f32 = 10.0;
+const TERMINAL_FOOTER_HEIGHT: f32 = 28.0;
 const TERMINAL_DIVIDER_MARKER: &str = "__ADE_BLOCK_DIVIDER__";
 const TERMINAL_DIVIDER_OFFSET: f32 = 7.0;
 const TERMINAL_REVEAL_DURATION: Duration = Duration::from_millis(160);
@@ -2201,7 +2202,11 @@ fn render_layout(
     }
 }
 
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::too_many_lines
+)]
 fn terminal_pane_ui(
     ui: &mut egui::Ui,
     rect: egui::Rect,
@@ -2212,6 +2217,8 @@ fn terminal_pane_ui(
     accept_input: bool,
 ) {
     ui.painter().rect_filled(rect, 0.0, terminal_background());
+    let footer_top = (rect.bottom() - TERMINAL_FOOTER_HEIGHT).max(rect.top());
+    let footer_rect = egui::Rect::from_min_max(egui::pos2(rect.left(), footer_top), rect.max);
     let content_min = egui::pos2(
         (rect.left() + TERMINAL_SIDE_PADDING).min(rect.right()),
         (rect.top() + TERMINAL_BOTTOM_PADDING).min(rect.bottom()),
@@ -2220,7 +2227,7 @@ fn terminal_pane_ui(
         content_min,
         egui::pos2(
             (rect.right() - TERMINAL_SIDE_PADDING).max(content_min.x),
-            (rect.bottom() - TERMINAL_BOTTOM_PADDING).max(content_min.y),
+            (footer_top - TERMINAL_BOTTOM_PADDING).max(content_min.y),
         ),
     );
     let font_id = FontId::new(TERMINAL_FONT_SIZE, FontFamily::Monospace);
@@ -2257,7 +2264,7 @@ fn terminal_pane_ui(
             .max(content_rect.top());
         let dock_rect = egui::Rect::from_min_max(
             egui::pos2(rect.left(), dock_top),
-            egui::pos2(rect.right(), rect.bottom()),
+            egui::pos2(rect.right(), footer_top),
         );
         ui.painter()
             .rect_filled(dock_rect, 0.0, Color32::from_rgb(10, 10, 10));
@@ -2277,6 +2284,8 @@ fn terminal_pane_ui(
             );
         }
     }
+
+    paint_terminal_footer(ui, footer_rect, active);
 
     let job = terminal_layout_job(&pane.parser, pane.selection, cell_height);
     let galley = ui.fonts_mut(|fonts| fonts.layout_job(job));
@@ -2380,6 +2389,51 @@ fn terminal_pane_ui(
             0.0,
             Stroke::new(1.0, red),
             egui::StrokeKind::Inside,
+        );
+    }
+}
+
+fn paint_terminal_footer(ui: &mut egui::Ui, rect: egui::Rect, active: bool) {
+    ui.painter()
+        .rect_filled(rect, 0.0, Color32::from_rgb(5, 5, 5));
+    ui.painter().hline(
+        rect.x_range(),
+        rect.top(),
+        Stroke::new(1.0, Color32::from_rgb(28, 28, 28)),
+    );
+
+    let key_color = if active {
+        Color32::from_rgb(190, 190, 190)
+    } else {
+        Color32::from_rgb(105, 105, 105)
+    };
+    let label_color = if active {
+        Color32::from_rgb(125, 125, 125)
+    } else {
+        Color32::from_rgb(76, 76, 76)
+    };
+    let baseline = egui::pos2(rect.left() + TERMINAL_SIDE_PADDING, rect.center().y);
+    ui.painter().text(
+        baseline,
+        egui::Align2::LEFT_CENTER,
+        "Ctrl+Shift+P",
+        FontId::new(11.0, FontFamily::Monospace),
+        key_color,
+    );
+    ui.painter().text(
+        baseline + Vec2::new(90.0, 0.0),
+        egui::Align2::LEFT_CENTER,
+        "Command palette",
+        FontId::proportional(12.0),
+        label_color,
+    );
+    if active && rect.width() >= 430.0 {
+        ui.painter().text(
+            egui::pos2(rect.right() - TERMINAL_SIDE_PADDING, rect.center().y),
+            egui::Align2::RIGHT_CENTER,
+            "→  Complete from history",
+            FontId::proportional(12.0),
+            label_color,
         );
     }
 }
