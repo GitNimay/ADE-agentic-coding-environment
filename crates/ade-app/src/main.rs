@@ -1920,8 +1920,9 @@ fn render_layout(
                 SplitAxis::Rows => (rect.height() - DIVIDER_SIZE, MIN_PANE_HEIGHT),
             };
             let ratio_value = constrained_split_ratio(*ratio, available, minimum_extent);
-            let mut changed = (*ratio - ratio_value).abs() > f32::EPSILON;
-            *ratio = ratio_value;
+            // Minimum pane sizes constrain only this frame. Persisting the clamp would leave an
+            // equal grid uneven after a temporarily narrow window is enlarged again.
+            let mut changed = false;
             let (first_rect, divider_rect, second_rect) = match axis {
                 SplitAxis::Columns => {
                     let split_x =

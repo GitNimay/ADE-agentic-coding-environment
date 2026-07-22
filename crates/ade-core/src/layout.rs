@@ -260,7 +260,7 @@ fn pane_row(panes: &[PaneId]) -> LayoutNode {
         [pane_id] => LayoutNode::pane(*pane_id),
         [first, rest @ ..] => LayoutNode::Split {
             axis: SplitAxis::Columns,
-            ratio: 1.0 / panes.len() as f32,
+            ratio: 1.0 / f32::from(u16::try_from(panes.len()).expect("terminal row is too large")),
             first: Box::new(LayoutNode::pane(*first)),
             second: Box::new(pane_row(rest)),
         },
@@ -336,29 +336,67 @@ mod tests {
             .map(|_| PaneId::new())
             .collect();
 
-        for count in 0..=MAX_TERMINALS_PER_WORKSPACE {
-            let layout = managed_terminal_layout(&panes[..count]);
-            assert_eq!(layout.pane_ids(), panes[..count]);
-            layout.validate().unwrap();
+        assert_grid(&managed_terminal_layout(&panes[..0]), &panes, &[]);
+        assert_grid(&managed_terminal_layout(&panes[..1]), &panes, &[1]);
+        assert_grid(&managed_terminal_layout(&panes[..2]), &panes, &[2]);
+        assert_grid(&managed_terminal_layout(&panes[..3]), &panes, &[3]);
+        assert_grid(&managed_terminal_layout(&panes[..4]), &panes, &[2, 2]);
+        assert_grid(&managed_terminal_layout(&panes[..5]), &panes, &[3, 2]);
+        assert_grid(&managed_terminal_layout(&panes[..6]), &panes, &[3, 3]);
+    }
 
-            match count {
-                0 | 1 => assert!(!matches!(layout, LayoutNode::Split { .. })),
-                2 | 3 => assert!(matches!(
-                    layout,
-                    LayoutNode::Split {
-                        axis: SplitAxis::Columns,
-                        ..
-                    }
-                )),
-                4..=6 => assert!(matches!(
-                    layout,
-                    LayoutNode::Split {
-                        axis: SplitAxis::Rows,
-                        ..
-                    }
-                )),
-                _ => unreachable!(),
+    fn assert_grid(layout: &LayoutNode, panes: &[PaneId], row_lengths: &[usize]) {
+        layout.validate().unwrap();
+        assert_eq!(
+            layout.pane_ids(),
+            panes[..row_lengths.iter().sum::<usize>()]
+        );
+
+        match row_lengths {
+            [] => assert!(matches!(layout, LayoutNode::Empty)),
+            [row_length] => assert_row(layout, &panes[..*row_length]),
+            [first_row_length, second_row_length] => {
+                let LayoutNode::Split {
+                    axis,
+                    ratio,
+                    first,
+                    second,
+                } = layout
+                else {
+                    panic!("expected a two-row terminal grid");
+                };
+                assert_eq!(*axis, SplitAxis::Rows);
+                assert!((*ratio - 0.5).abs() < f32::EPSILON);
+                assert_row(first, &panes[..*first_row_length]);
+                assert_row(
+                    second,
+                    &panes[*first_row_length..*first_row_length + *second_row_length],
+                );
             }
+            _ => panic!("managed terminal layouts support at most two rows"),
+        }
+    }
+
+    fn assert_row(layout: &LayoutNode, panes: &[PaneId]) {
+        match panes {
+            [pane_id] => assert_eq!(layout, &LayoutNode::pane(*pane_id)),
+            [first_pane, remaining @ ..] => {
+                let LayoutNode::Split {
+                    axis,
+                    ratio,
+                    first,
+                    second,
+                } = layout
+                else {
+                    panic!("expected a terminal row");
+                };
+                assert_eq!(*axis, SplitAxis::Columns);
+                let pane_count = u16::try_from(panes.len()).unwrap();
+                assert!((*ratio - 1.0 / f32::from(pane_count)).abs() < f32::EPSILON);
+                assert_eq!(first.as_ref(), &LayoutNode::pane(*first_pane));
+                assert_row(second, remaining);
+            }
+            [] => assert!(matches!(layout, LayoutNode::Empty)),
         }
     }
 }

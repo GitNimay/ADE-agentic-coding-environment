@@ -679,7 +679,10 @@ mod tests {
         }
 
         let workspace = &state.snapshot().workspaces[0];
-        assert_eq!(workspace.layout.pane_ids().len(), MAX_TERMINALS_PER_WORKSPACE);
+        assert_eq!(
+            workspace.layout.pane_ids().len(),
+            MAX_TERMINALS_PER_WORKSPACE
+        );
         assert!(matches!(
             workspace.layout,
             LayoutNode::Split {
