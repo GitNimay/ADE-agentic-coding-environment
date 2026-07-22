@@ -7,6 +7,8 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 concurrency:
   group: release-${{ github.ref }}
@@ -14,7 +16,7 @@ concurrency:
 
 jobs:
   release:
-    name: Signed Windows release
+    name: Portable Windows release
     runs-on: windows-latest
     timeout-minutes: 60
 
@@ -46,49 +48,22 @@ jobs:
           cargo clippy --workspace --all-targets --locked -- -D warnings
           cargo test --workspace --locked
 
-      - name: Restore signing certificate
+      - name: Build portable Windows archive
         shell: pwsh
-        env:
-          CERTIFICATE_BASE64: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_BASE64 }}
-        run: |
-          if (-not $env:CERTIFICATE_BASE64) {
-            throw "Repository secret WINDOWS_SIGNING_CERTIFICATE_BASE64 is not configured"
-          }
-          $certificatePath = Join-Path $env:RUNNER_TEMP "termy-signing.pfx"
-          [IO.File]::WriteAllBytes(
-            $certificatePath,
-            [Convert]::FromBase64String($env:CERTIFICATE_BASE64)
-          )
-          "TERMY_CERTIFICATE_PATH=$certificatePath" >> $env:GITHUB_ENV
+        run: ./packaging/build-portable.ps1 -Version $env:TERMY_VERSION
 
-      - name: Build signed MSIX and update feed
-        shell: pwsh
-        env:
-          WINDOWS_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_PASSWORD }}
-        run: |
-          if (-not $env:WINDOWS_SIGNING_CERTIFICATE_PASSWORD) {
-            throw "Repository secret WINDOWS_SIGNING_CERTIFICATE_PASSWORD is not configured"
-          }
-          $releaseBase = "https://github.com/${{ github.repository }}/releases/latest/download"
-          ./packaging/build-msix.ps1 `
-            -Version $env:TERMY_VERSION `
-            -CertificatePath $env:TERMY_CERTIFICATE_PATH `
-            -PackageUri "$releaseBase/termy-x64.msix" `
-            -AppInstallerUri "$releaseBase/termy.appinstaller" `
-            -StableFileNames
-
-      - name: Remove private build staging
-        shell: pwsh
-        run: Remove-Item -LiteralPath dist/msix-staging -Recurse -Force
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: dist/termy-windows-x64.zip
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: termy-${{ env.TERMY_VERSION }}-windows-x64
           path: |
-            dist/termy-x64.msix
-            dist/termy-x64.msix.sha256
-            dist/termy.appinstaller
+            dist/termy-windows-x64.zip
+            dist/termy-windows-x64.zip.sha256
           if-no-files-found: error
           retention-days: 14
 
@@ -100,27 +75,17 @@ jobs:
           gh release view "${{ github.ref_name }}" *> $null
           if ($LASTEXITCODE -eq 0) {
             gh release upload "${{ github.ref_name }}" `
-              dist/termy-x64.msix `
-              dist/termy-x64.msix.sha256 `
-              dist/termy.appinstaller `
+              dist/termy-windows-x64.zip `
+              dist/termy-windows-x64.zip.sha256 `
               --clobber
           } else {
             gh release create "${{ github.ref_name }}" `
-              dist/termy-x64.msix `
-              dist/termy-x64.msix.sha256 `
-              dist/termy.appinstaller `
+              dist/termy-windows-x64.zip `
+              dist/termy-windows-x64.zip.sha256 `
               --verify-tag `
               --generate-notes `
               --title "Termy $env:TERMY_VERSION"
           }
           if ($LASTEXITCODE -ne 0) {
             throw "GitHub Release publication failed"
-          }
-
-      - name: Delete temporary signing certificate
-        if: always()
-        shell: pwsh
-        run: |
-          if ($env:TERMY_CERTIFICATE_PATH -and (Test-Path -LiteralPath $env:TERMY_CERTIFICATE_PATH)) {
-            Remove-Item -LiteralPath $env:TERMY_CERTIFICATE_PATH -Force
           }

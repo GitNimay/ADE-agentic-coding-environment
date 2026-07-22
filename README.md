@@ -9,12 +9,14 @@ the window is closed and stores workspace state in SQLite.
 
 ## Install
 
-Public builds are delivered from GitHub Releases as signed Windows packages. Download and open
-[`termy.appinstaller`](https://github.com/GitNimay/ADE-agentic-coding-environment/releases/latest/download/termy.appinstaller).
-Windows App Installer handles installation and checks for signed updates on launch and in the
-background.
+Download
+[`termy-windows-x64.zip`](https://github.com/GitNimay/ADE-agentic-coding-environment/releases/latest/download/termy-windows-x64.zip),
+extract it to a permanent folder, and run `termy.exe`. Windows 11 x64 is required.
 
-The download becomes available after the first signed release. Windows 11 x64 is required.
+The portable build is free and currently unsigned, so Windows SmartScreen may show an unknown
+publisher warning. Each release includes a SHA-256 checksum and GitHub build-provenance attestation.
+Updates are installed manually by downloading the newer ZIP and replacing `termy.exe`; workspace
+data remains in the user's local application-data directory.
 
 Each workspace supports up to six terminals. Layouts are managed by terminal count: two or three
 terminals form one row, four form a 2x2 grid, five use rows of three and two, and six use a 3x2
@@ -64,7 +66,7 @@ Default shortcuts:
 - `Ctrl+PageUp` / `Ctrl+PageDown`: switch workspace
 - `F2`: rename the active workspace
 
-Build an unsigned development MSIX with
-`powershell -ExecutionPolicy Bypass -File packaging\build-msix.ps1`. It is intentionally unsuitable
-for public installation. Maintainer setup and the signed release process are documented in
+Build a portable ZIP with
+`powershell -ExecutionPolicy Bypass -File packaging\build-portable.ps1`. An optional unsigned
+development MSIX can be built with `packaging\build-msix.ps1`. Maintainer release instructions are in
 [`docs/releasing.md`](docs/releasing.md).
