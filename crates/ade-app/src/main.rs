@@ -55,10 +55,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    let app_icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/app-icon.png"))?;
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
         viewport: egui::ViewportBuilder::default()
             .with_title("")
+            .with_icon(app_icon)
             .with_inner_size([1280.0, 800.0])
             .with_min_inner_size([480.0, 360.0])
             .with_decorations(false)
@@ -1915,11 +1917,18 @@ fn render_layout(
             second,
         } => {
             let pixels_per_point = ui.ctx().pixels_per_point();
-            let (available, minimum_extent) = match axis {
-                SplitAxis::Columns => (rect.width() - DIVIDER_SIZE, MIN_PANE_WIDTH),
-                SplitAxis::Rows => (rect.height() - DIVIDER_SIZE, MIN_PANE_HEIGHT),
+            let available = match axis {
+                SplitAxis::Columns => rect.width() - DIVIDER_SIZE,
+                SplitAxis::Rows => rect.height() - DIVIDER_SIZE,
             };
-            let ratio_value = constrained_split_ratio(*ratio, available, minimum_extent);
+            let first_minimum = minimum_layout_extent(first, *axis);
+            let second_minimum = minimum_layout_extent(second, *axis);
+            let first_dividers = internal_divider_extent(first, *axis);
+            let second_dividers = internal_divider_extent(second, *axis);
+            let allocation_ratio =
+                allocation_ratio_for_layout(*ratio, available, first_dividers, second_dividers);
+            let ratio_value =
+                constrained_split_ratio(allocation_ratio, available, first_minimum, second_minimum);
             // Minimum pane sizes constrain only this frame. Persisting the clamp would leave an
             // equal grid uneven after a temporarily narrow window is enlarged again.
             let mut changed = false;
@@ -1965,18 +1974,26 @@ fn render_layout(
                 let pointer = response
                     .interact_pointer_pos()
                     .unwrap_or(divider_rect.center());
-                *ratio = match axis {
+                let requested_allocation = match axis {
                     SplitAxis::Columns => constrained_split_ratio(
                         (pointer.x - rect.left()) / available,
                         available,
-                        minimum_extent,
+                        first_minimum,
+                        second_minimum,
                     ),
                     SplitAxis::Rows => constrained_split_ratio(
                         (pointer.y - rect.top()) / available,
                         available,
-                        minimum_extent,
+                        first_minimum,
+                        second_minimum,
                     ),
                 };
+                *ratio = layout_ratio_for_allocation(
+                    requested_allocation,
+                    available,
+                    first_dividers,
+                    second_dividers,
+                );
                 changed = true;
             }
             let divider_color = if response.hovered() || response.dragged() {
@@ -2634,12 +2651,92 @@ fn cells_for_pixels(pixels: f32, cell_size: f32) -> u16 {
     (pixels / cell_size).floor().clamp(2.0, f32::from(i16::MAX)) as u16
 }
 
-fn constrained_split_ratio(ratio: f32, available: f32, minimum_extent: f32) -> f32 {
+fn minimum_layout_extent(node: &LayoutNode, measured_axis: SplitAxis) -> f32 {
+    match node {
+        LayoutNode::Empty => 0.0,
+        LayoutNode::Pane { .. } => match measured_axis {
+            SplitAxis::Columns => MIN_PANE_WIDTH,
+            SplitAxis::Rows => MIN_PANE_HEIGHT,
+        },
+        LayoutNode::Split {
+            axis,
+            first,
+            second,
+            ..
+        } if *axis == measured_axis => {
+            minimum_layout_extent(first, measured_axis)
+                + DIVIDER_SIZE
+                + minimum_layout_extent(second, measured_axis)
+        }
+        LayoutNode::Split { first, second, .. } => minimum_layout_extent(first, measured_axis)
+            .max(minimum_layout_extent(second, measured_axis)),
+    }
+}
+
+fn internal_divider_extent(node: &LayoutNode, measured_axis: SplitAxis) -> f32 {
+    match node {
+        LayoutNode::Empty | LayoutNode::Pane { .. } => 0.0,
+        LayoutNode::Split {
+            axis,
+            first,
+            second,
+            ..
+        } if *axis == measured_axis => {
+            internal_divider_extent(first, measured_axis)
+                + DIVIDER_SIZE
+                + internal_divider_extent(second, measured_axis)
+        }
+        LayoutNode::Split { first, second, .. } => internal_divider_extent(first, measured_axis)
+            .max(internal_divider_extent(second, measured_axis)),
+    }
+}
+
+fn allocation_ratio_for_layout(
+    layout_ratio: f32,
+    available: f32,
+    first_dividers: f32,
+    second_dividers: f32,
+) -> f32 {
     if available <= 0.0 {
         return 0.5;
     }
-    let minimum_ratio = (minimum_extent / available).clamp(0.1, 0.5);
-    ratio.clamp(minimum_ratio, 1.0 - minimum_ratio)
+    let content_extent = (available - first_dividers - second_dividers).max(0.0);
+    (first_dividers + content_extent * layout_ratio) / available
+}
+
+fn layout_ratio_for_allocation(
+    allocation_ratio: f32,
+    available: f32,
+    first_dividers: f32,
+    second_dividers: f32,
+) -> f32 {
+    let content_extent = available - first_dividers - second_dividers;
+    if content_extent <= 0.0 {
+        return allocation_ratio.clamp(0.1, 0.9);
+    }
+    ((allocation_ratio * available - first_dividers) / content_extent).clamp(0.1, 0.9)
+}
+
+fn constrained_split_ratio(
+    ratio: f32,
+    available: f32,
+    first_minimum: f32,
+    second_minimum: f32,
+) -> f32 {
+    if available <= 0.0 {
+        return 0.5;
+    }
+    let desired = ratio.clamp(0.1, 0.9);
+    if first_minimum + second_minimum > available {
+        // There is not enough room for every pane's preferred minimum. Keeping the requested
+        // proportion makes managed 2/3/4/5/6 grids scale evenly instead of allowing nested
+        // minimum clamps to make the last cells progressively narrower.
+        return desired;
+    }
+
+    let minimum_ratio = (first_minimum / available).clamp(0.1, 0.9);
+    let maximum_ratio = (1.0 - second_minimum / available).clamp(0.1, 0.9);
+    desired.clamp(minimum_ratio, maximum_ratio)
 }
 
 fn snap_to_pixel(value: f32, pixels_per_point: f32) -> f32 {
@@ -2794,13 +2891,123 @@ mod tests {
 
     #[test]
     fn split_ratio_keeps_both_panes_usable() {
-        let left = constrained_split_ratio(0.05, 900.0, 220.0);
-        let right = constrained_split_ratio(0.95, 900.0, 220.0);
-        let crowded = constrained_split_ratio(0.2, 300.0, 220.0);
+        let left = constrained_split_ratio(0.05, 900.0, 220.0, 220.0);
+        let right = constrained_split_ratio(0.95, 900.0, 220.0, 220.0);
+        let crowded = constrained_split_ratio(0.2, 300.0, 220.0, 220.0);
 
         assert!((left - 220.0 / 900.0).abs() < f32::EPSILON);
         assert!((right - 680.0 / 900.0).abs() < f32::EPSILON);
-        assert!((crowded - 0.5).abs() < f32::EPSILON);
+        assert!((crowded - 0.2).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn nested_grid_minimums_account_for_every_terminal() {
+        let panes: Vec<_> = (0..3).map(|_| PaneId::new()).collect();
+        let layout = ade_core::managed_terminal_layout(&panes);
+
+        assert!(
+            (minimum_layout_extent(&layout, SplitAxis::Columns)
+                - (3.0 * MIN_PANE_WIDTH + 2.0 * DIVIDER_SIZE))
+                .abs()
+                < f32::EPSILON
+        );
+        assert!(
+            (minimum_layout_extent(&layout, SplitAxis::Rows) - MIN_PANE_HEIGHT).abs()
+                < f32::EPSILON
+        );
+        assert!(
+            (internal_divider_extent(&layout, SplitAxis::Columns) - 2.0 * DIVIDER_SIZE).abs()
+                < f32::EPSILON
+        );
+    }
+
+    #[test]
+    fn crowded_three_column_grid_preserves_equal_proportions() {
+        let available = 594.0;
+        let root = allocation_ratio_for_layout(1.0 / 3.0, available, 0.0, DIVIDER_SIZE);
+        let root = constrained_split_ratio(
+            root,
+            available,
+            MIN_PANE_WIDTH,
+            2.0 * MIN_PANE_WIDTH + DIVIDER_SIZE,
+        );
+        let first_width = available * root;
+        let remaining = available * (1.0 - root) - DIVIDER_SIZE;
+        let nested = allocation_ratio_for_layout(0.5, remaining, 0.0, 0.0);
+        let nested = constrained_split_ratio(nested, remaining, MIN_PANE_WIDTH, MIN_PANE_WIDTH);
+        let second_width = remaining * nested;
+        let third_width = remaining * (1.0 - nested);
+
+        assert!((nested - 0.5).abs() < f32::EPSILON);
+        assert!((first_width - second_width).abs() < f32::EPSILON);
+        assert!((second_width - third_width).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn managed_grids_stay_even_at_wide_and_compact_window_sizes() {
+        let panes: Vec<_> = (0..MAX_TERMINALS_PER_WORKSPACE)
+            .map(|_| PaneId::new())
+            .collect();
+
+        for count in [2, 3, 4, 6] {
+            let layout = ade_core::managed_terminal_layout(&panes[..count]);
+            for (width, height) in [(1_440.0, 900.0), (640.0, 360.0)] {
+                let mut sizes = Vec::new();
+                collect_pane_sizes(&layout, width, height, &mut sizes);
+                let (expected_width, expected_height) = sizes[0];
+
+                assert_eq!(sizes.len(), count);
+                assert!(sizes.iter().all(|(pane_width, pane_height)| {
+                    (pane_width - expected_width).abs() < 0.01
+                        && (pane_height - expected_height).abs() < 0.01
+                }));
+            }
+        }
+    }
+
+    fn collect_pane_sizes(node: &LayoutNode, width: f32, height: f32, sizes: &mut Vec<(f32, f32)>) {
+        let LayoutNode::Split {
+            axis,
+            ratio,
+            first,
+            second,
+        } = node
+        else {
+            if matches!(node, LayoutNode::Pane { .. }) {
+                sizes.push((width, height));
+            }
+            return;
+        };
+        let extent = match axis {
+            SplitAxis::Columns => width,
+            SplitAxis::Rows => height,
+        };
+        let available = extent - DIVIDER_SIZE;
+        let allocation = allocation_ratio_for_layout(
+            *ratio,
+            available,
+            internal_divider_extent(first, *axis),
+            internal_divider_extent(second, *axis),
+        );
+        let allocation = constrained_split_ratio(
+            allocation,
+            available,
+            minimum_layout_extent(first, *axis),
+            minimum_layout_extent(second, *axis),
+        );
+        let first_extent = available * allocation;
+        let second_extent = available * (1.0 - allocation);
+
+        match axis {
+            SplitAxis::Columns => {
+                collect_pane_sizes(first, first_extent, height, sizes);
+                collect_pane_sizes(second, second_extent, height, sizes);
+            }
+            SplitAxis::Rows => {
+                collect_pane_sizes(first, width, first_extent, sizes);
+                collect_pane_sizes(second, width, second_extent, sizes);
+            }
+        }
     }
 
     #[test]

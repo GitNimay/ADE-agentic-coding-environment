@@ -22,24 +22,24 @@ try {
 
     Add-Type -AssemblyName System.Drawing
     function New-AdeAsset([string]$Path, [int]$Width, [int]$Height) {
-        $bitmap = [System.Drawing.Bitmap]::new($Width, $Height)
+        $source = [System.Drawing.Image]::FromFile((Join-Path $workspace "crates\ade-app\assets\app-icon.png"))
+        $bitmap = [System.Drawing.Bitmap]::new($Width, $Height, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
         $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
         try {
-            $graphics.Clear([System.Drawing.Color]::FromArgb(26, 28, 27))
-            $accent = [System.Drawing.SolidBrush]::new([System.Drawing.Color]::FromArgb(70, 149, 245))
-            $fontSize = [Math]::Max(12, [Math]::Min($Width, $Height) * 0.32)
-            $font = [System.Drawing.Font]::new("Segoe UI", $fontSize, [System.Drawing.FontStyle]::Bold)
-            $format = [System.Drawing.StringFormat]::new()
-            $format.Alignment = [System.Drawing.StringAlignment]::Center
-            $format.LineAlignment = [System.Drawing.StringAlignment]::Center
-            $graphics.DrawString(">_", $font, $accent, [System.Drawing.RectangleF]::new(0, 0, $Width, $Height), $format)
+            $graphics.Clear([System.Drawing.Color]::White)
+            $graphics.CompositingQuality = [System.Drawing.Drawing2D.CompositingQuality]::HighQuality
+            $graphics.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+            $graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::HighQuality
+            $graphics.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
+            $side = [Math]::Min($Width, $Height)
+            $left = [Math]::Floor(($Width - $side) / 2)
+            $top = [Math]::Floor(($Height - $side) / 2)
+            $graphics.DrawImage($source, $left, $top, $side, $side)
             $bitmap.Save($Path, [System.Drawing.Imaging.ImageFormat]::Png)
-            $format.Dispose()
-            $font.Dispose()
-            $accent.Dispose()
         } finally {
             $graphics.Dispose()
             $bitmap.Dispose()
+            $source.Dispose()
         }
     }
 
