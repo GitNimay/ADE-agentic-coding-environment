@@ -2325,8 +2325,8 @@ fn terminal_pane_ui(
     };
 
     if bottom_anchored {
-        let fallback_dock_top = grid_origin.y + f32::from(cursor_row) * cell_height
-            - TERMINAL_DIVIDER_OFFSET;
+        let fallback_dock_top =
+            grid_origin.y + f32::from(cursor_row) * cell_height - TERMINAL_DIVIDER_OFFSET;
         let dock_top = current_block_top
             .map_or(fallback_dock_top, |top| top + 2.0 * cell_height)
             .max(content_rect.top());
@@ -2382,13 +2382,7 @@ fn terminal_pane_ui(
             egui::pos2(rect.left(), header_top),
             egui::pos2(rect.right(), header_top + 2.0 * cell_height),
         );
-        paint_command_header(
-            ui,
-            header_rect,
-            &pane.cwd,
-            pane.git_status.as_ref(),
-            active,
-        );
+        paint_command_header(ui, header_rect, &pane.cwd, pane.git_status.as_ref(), active);
     }
     let response = ui.interact(
         content_rect,
@@ -2527,6 +2521,9 @@ fn paint_command_header(
 ) {
     const CHIP_HEIGHT: f32 = 22.0;
     const GAP: f32 = 7.0;
+    const ICON_WIDTH: f32 = 12.0;
+    const ICON_TEXT_GAP: f32 = 6.0;
+    const STAT_GAP: f32 = 16.0;
     let clip = ui.painter().with_clip_rect(header_rect.expand(1.0));
     let separator = Stroke::new(1.0, Color32::from_rgb(38, 38, 38));
     clip.hline(header_rect.x_range(), header_rect.top(), separator);
@@ -2630,7 +2627,39 @@ fn paint_command_header(
     x = branch_rect.right() + GAP;
 
     let stats_width = right - x;
-    if stats_width < 38.0 {
+    let count_label = git.changed_files.to_string();
+    let addition_label = format!("+{}", git.additions);
+    let deletion_label = format!("-{}", git.deletions);
+    let (count_width, addition_width, deletion_width) = ui.fonts_mut(|fonts| {
+        (
+            fonts
+                .layout_no_wrap(
+                    count_label.clone(),
+                    font.clone(),
+                    Color32::from_rgb(175, 175, 175),
+                )
+                .size()
+                .x,
+            fonts
+                .layout_no_wrap(
+                    addition_label.clone(),
+                    font.clone(),
+                    Color32::from_rgb(82, 196, 92),
+                )
+                .size()
+                .x,
+            fonts
+                .layout_no_wrap(
+                    deletion_label.clone(),
+                    font.clone(),
+                    Color32::from_rgb(238, 91, 91),
+                )
+                .size()
+                .x,
+        )
+    });
+    let count_group_width = ICON_WIDTH + ICON_TEXT_GAP + count_width;
+    if stats_width < count_group_width {
         return;
     }
     paint_file_icon(
@@ -2638,28 +2667,35 @@ fn paint_command_header(
         egui::pos2(x, center_y),
         Color32::from_rgb(145, 145, 145),
     );
-    x += 16.0;
+    x += ICON_WIDTH + ICON_TEXT_GAP;
     clip.text(
         egui::pos2(x, center_y),
         egui::Align2::LEFT_CENTER,
-        git.changed_files.to_string(),
+        count_label,
         font.clone(),
         Color32::from_rgb(175, 175, 175),
     );
-    if stats_width >= 94.0 {
-        x += 28.0;
+    x += count_width;
+    let additions_fit = count_group_width + STAT_GAP + addition_width <= stats_width;
+    if additions_fit {
+        x += STAT_GAP;
         clip.text(
             egui::pos2(x, center_y),
             egui::Align2::LEFT_CENTER,
-            format!("+{}", git.additions),
+            addition_label,
             font.clone(),
             Color32::from_rgb(82, 196, 92),
         );
-        x += 43.0;
+        x += addition_width;
+    }
+    let deletions_fit =
+        count_group_width + STAT_GAP + addition_width + STAT_GAP + deletion_width <= stats_width;
+    if additions_fit && deletions_fit {
+        x += STAT_GAP;
         clip.text(
             egui::pos2(x, center_y),
             egui::Align2::LEFT_CENTER,
-            format!("-{}", git.deletions),
+            deletion_label,
             font,
             Color32::from_rgb(238, 91, 91),
         );
