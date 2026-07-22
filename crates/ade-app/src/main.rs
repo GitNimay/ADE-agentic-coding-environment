@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ade_core::{LayoutNode, PaneId, SessionStatus, SplitAxis, SplitDirection, Workspace};
 use ade_protocol::{
@@ -33,9 +33,13 @@ const MIN_PANE_HEIGHT: f32 = 120.0;
 const TERMINAL_SIDE_PADDING: f32 = 10.0;
 const TERMINAL_BOTTOM_PADDING: f32 = 10.0;
 const SIDEBAR_BREAKPOINT: f32 = 600.0;
-const SIDEBAR_WIDTH: f32 = 240.0;
-const TABLET_SIDEBAR_WIDTH: f32 = 220.0;
-const SIDEBAR_ROW_HEIGHT: f32 = 44.0;
+const SIDEBAR_WIDTH: f32 = 256.0;
+const TABLET_SIDEBAR_WIDTH: f32 = 224.0;
+const SIDEBAR_ROW_HEIGHT: f32 = 40.0;
+const COLLAPSED_SIDEBAR_WIDTH: f32 = 56.0;
+const SIDEBAR_TRIGGER_WIDTH: f32 = 16.0;
+const SIDEBAR_OPEN_DELAY: Duration = Duration::from_millis(180);
+const SIDEBAR_CLOSE_DELAY: Duration = Duration::from_millis(450);
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const DETACHED_PROCESS: u32 = 0x0000_0008;
@@ -217,6 +221,9 @@ struct AdeApp {
     palette_query: String,
     client: Option<DaemonClient>,
     rename_workspace: Option<(ade_core::WorkspaceId, String)>,
+    sidebar_open: bool,
+    sidebar_hover_started: Option<Instant>,
+    sidebar_left_at: Option<Instant>,
 }
 
 impl AdeApp {
@@ -233,6 +240,9 @@ impl AdeApp {
             palette_query: String::new(),
             client: client.ok(),
             rename_workspace: None,
+            sidebar_open: false,
+            sidebar_hover_started: None,
+            sidebar_left_at: None,
         };
         app.send(ClientRequest::Attach);
         app
@@ -501,31 +511,46 @@ impl AdeApp {
         let mut action = None;
         let mut create_workspace = false;
         let tablet = root_ui.available_width() <= 960.0;
-        egui::Panel::left("workspace-sidebar")
-            .resizable(!tablet)
-            .default_size(if tablet {
-                TABLET_SIDEBAR_WIDTH
-            } else {
-                SIDEBAR_WIDTH
-            })
-            .size_range(if tablet {
-                TABLET_SIDEBAR_WIDTH..=TABLET_SIDEBAR_WIDTH
-            } else {
-                220.0..=320.0
-            })
+        let expanded_width = if tablet {
+            TABLET_SIDEBAR_WIDTH
+        } else {
+            SIDEBAR_WIDTH
+        };
+        let expansion = context.animate_bool_with_time_and_easing(
+            egui::Id::new("workspace-sidebar-animation"),
+            self.sidebar_open,
+            0.16,
+            egui::emath::easing::cubic_out,
+        );
+        let sidebar_width = egui::lerp(COLLAPSED_SIDEBAR_WIDTH..=expanded_width, expansion);
+        let mut context_menu_open = false;
+        let panel = egui::Panel::left("workspace-sidebar")
+            .resizable(false)
+            .exact_size(sidebar_width)
             .frame(
                 egui::Frame::NONE
                     .fill(surface_primary())
                     .stroke(Stroke::new(1.0, border())),
             )
             .show(root_ui, |ui| {
+                if sidebar_width < 144.0 {
+                    compact_sidebar_rail(
+                        ui,
+                        &self.workspaces,
+                        self.active_workspace,
+                        &mut action,
+                        &mut context_menu_open,
+                    );
+                    return;
+                }
                 let (header_rect, _) =
-                    ui.allocate_exact_size(Vec2::new(ui.available_width(), 40.0), Sense::hover());
+                    ui.allocate_exact_size(Vec2::new(ui.available_width(), 48.0), Sense::hover());
                 let mut header = ui.new_child(
                     egui::UiBuilder::new()
-                        .max_rect(header_rect.shrink2(Vec2::new(10.0, 4.0)))
+                        .max_rect(header_rect.shrink2(Vec2::new(12.0, 8.0)))
                         .layout(egui::Layout::left_to_right(egui::Align::Center)),
                 );
+                paint_app_mark(&mut header, 24.0);
                 header.label(
                     RichText::new("Workspaces")
                         .size(13.0)
@@ -533,11 +558,7 @@ impl AdeApp {
                         .color(text_secondary()),
                 );
                 header.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui
-                        .add_sized(
-                            [24.0, 24.0],
-                            egui::Button::new(RichText::new("+").size(16.0)).min_size(Vec2::ZERO),
-                        )
+                    if compact_icon_button(ui, "+", "New workspace")
                         .on_hover_text("New workspace")
                         .clicked()
                     {
@@ -559,22 +580,26 @@ impl AdeApp {
                     })
                     .show(ui, |ui| {
                         for (index, workspace) in self.workspaces.iter().enumerate() {
-                            if let Some(next) =
-                                workspace_row(ui, workspace, index, index == self.active_workspace)
-                            {
+                            if let Some(next) = workspace_row(
+                                ui,
+                                workspace,
+                                index,
+                                index == self.active_workspace,
+                                &mut context_menu_open,
+                            ) {
                                 action = Some(next);
                             }
                         }
-
-                        ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
-                            ui.label(
-                                RichText::new("Ctrl+Shift+P   Command palette")
-                                    .size(11.0)
-                                    .color(muted()),
-                            );
-                        });
                     });
             });
+
+        let pointer = context.input(|input| input.pointer.hover_pos());
+        let edge_hovered = pointer.is_some_and(|position| {
+            position.x <= panel.response.rect.left() + SIDEBAR_TRIGGER_WIDTH
+                && panel.response.rect.y_range().contains(position.y)
+        });
+        let panel_hovered = pointer.is_some_and(|position| panel.response.rect.contains(position));
+        self.update_sidebar_hover(panel_hovered || edge_hovered, context_menu_open);
 
         if create_workspace {
             self.request_new_workspace(context);
@@ -582,11 +607,44 @@ impl AdeApp {
         self.handle_workspace_action(action);
     }
 
+    fn update_sidebar_hover(&mut self, hovered: bool, context_menu_open: bool) {
+        let now = Instant::now();
+        if context_menu_open {
+            self.sidebar_open = true;
+            self.sidebar_left_at = None;
+            return;
+        }
+
+        if self.sidebar_open {
+            self.sidebar_hover_started = None;
+            if hovered {
+                self.sidebar_left_at = None;
+            } else {
+                let left_at = self.sidebar_left_at.get_or_insert(now);
+                if now.duration_since(*left_at) >= SIDEBAR_CLOSE_DELAY {
+                    self.sidebar_open = false;
+                    self.sidebar_left_at = None;
+                }
+            }
+        } else {
+            self.sidebar_left_at = None;
+            if hovered {
+                let hover_started = self.sidebar_hover_started.get_or_insert(now);
+                if now.duration_since(*hover_started) >= SIDEBAR_OPEN_DELAY {
+                    self.sidebar_open = true;
+                    self.sidebar_hover_started = None;
+                }
+            } else {
+                self.sidebar_hover_started = None;
+            }
+        }
+    }
+
     fn compact_workspace_bar(&mut self, root_ui: &mut egui::Ui, context: &egui::Context) {
         let mut action = None;
         let mut create_workspace = false;
         egui::Panel::top("compact-workspace-bar")
-            .exact_size(48.0)
+            .exact_size(40.0)
             .frame(
                 egui::Frame::NONE
                     .fill(surface_primary())
@@ -595,13 +653,6 @@ impl AdeApp {
             )
             .show(root_ui, |ui| {
                 ui.horizontal_centered(|ui| {
-                    ui.label(
-                        RichText::new("ADE")
-                            .size(14.0)
-                            .strong()
-                            .color(text_primary()),
-                    );
-                    ui.separator();
                     ui.menu_button(
                         RichText::new(self.workspaces.get(self.active_workspace).map_or_else(
                             || "Workspaces".to_owned(),
@@ -634,6 +685,14 @@ impl AdeApp {
                             }
                         },
                     );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if compact_icon_button(ui, "+", "New workspace")
+                            .on_hover_text("New workspace")
+                            .clicked()
+                        {
+                            create_workspace = true;
+                        }
+                    });
                 });
             });
 
@@ -928,11 +987,173 @@ impl WorkspaceState {
     }
 }
 
+fn compact_sidebar_rail(
+    ui: &mut egui::Ui,
+    workspaces: &[WorkspaceState],
+    active_workspace: usize,
+    action: &mut Option<WorkspaceAction>,
+    context_menu_open: &mut bool,
+) {
+    ui.add_space(12.0);
+    ui.vertical_centered(|ui| {
+        paint_app_mark(ui, 24.0).on_hover_text("ADE");
+    });
+    ui.add_space(12.0);
+    ui.separator();
+    ui.add_space(6.0);
+
+    for (index, workspace) in workspaces.iter().enumerate() {
+        if let Some(next) = compact_workspace_item(
+            ui,
+            workspace,
+            index,
+            index == active_workspace,
+            context_menu_open,
+        ) {
+            *action = Some(next);
+        }
+    }
+}
+
+fn paint_app_mark(ui: &mut egui::Ui, size: f32) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
+    ui.painter().rect(
+        rect,
+        6.0,
+        Color32::from_rgb(10, 10, 10),
+        Stroke::new(1.0, border_hover()),
+        egui::StrokeKind::Inside,
+    );
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        ">_",
+        FontId::monospace(size * 0.38),
+        text_primary(),
+    );
+    response
+}
+
+fn compact_workspace_item(
+    ui: &mut egui::Ui,
+    workspace: &WorkspaceState,
+    index: usize,
+    active: bool,
+    context_menu_open: &mut bool,
+) -> Option<WorkspaceAction> {
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), 50.0), Sense::click());
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(
+            egui::WidgetType::SelectableLabel,
+            true,
+            active,
+            &workspace.model.name,
+        )
+    });
+
+    if active || response.hovered() || response.context_menu_opened() {
+        ui.painter().rect_filled(
+            rect.shrink2(Vec2::new(8.0, 2.0)),
+            6.0,
+            if active {
+                surface_active()
+            } else {
+                surface_hover()
+            },
+        );
+    }
+
+    let icon_rect = egui::Rect::from_center_size(
+        egui::pos2(rect.center().x, rect.top() + 17.0),
+        Vec2::splat(24.0),
+    );
+    paint_workspace_icon(ui, icon_rect, workspace);
+    ui.painter().text(
+        egui::pos2(rect.center().x, rect.bottom() - 6.0),
+        egui::Align2::CENTER_BOTTOM,
+        compact_text(&workspace.model.name, 9),
+        FontId::proportional(8.5),
+        if active {
+            text_primary()
+        } else {
+            text_secondary()
+        },
+    );
+
+    let response = response.on_hover_text(format!(
+        "{}\n{}",
+        workspace.model.name,
+        workspace.model.root_directory.display()
+    ));
+    let mut next = response.clicked().then_some(WorkspaceAction::Focus(index));
+    if response.double_clicked() {
+        next = Some(WorkspaceAction::Edit(
+            workspace.model.id,
+            workspace.model.name.clone(),
+        ));
+    }
+    workspace_context_menu(&response, workspace, &mut next);
+    *context_menu_open |= response.context_menu_opened();
+    next
+}
+
+fn paint_workspace_icon(ui: &egui::Ui, rect: egui::Rect, workspace: &WorkspaceState) {
+    ui.painter()
+        .rect_filled(rect, 6.0, workspace_identity_color(workspace.model.id));
+    let initial = workspace
+        .model
+        .name
+        .chars()
+        .find(char::is_ascii_alphanumeric)
+        .map_or('W', |character| character.to_ascii_uppercase());
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        initial,
+        FontId::proportional(11.0),
+        Color32::WHITE,
+    );
+    if workspace.any_running() {
+        ui.painter().circle_filled(
+            egui::pos2(rect.right() - 1.0, rect.bottom() - 1.0),
+            3.0,
+            Color32::from_rgb(0x10, 0x7d, 0x32),
+        );
+        ui.painter().circle_stroke(
+            egui::pos2(rect.right() - 1.0, rect.bottom() - 1.0),
+            3.0,
+            Stroke::new(1.0, surface_primary()),
+        );
+    }
+}
+
+fn workspace_identity_color(workspace_id: ade_core::WorkspaceId) -> Color32 {
+    const VERCEL_COLORS: [(u8, u8, u8); 7] = [
+        (0x00, 0x59, 0xec),
+        (0xea, 0x00, 0x1d),
+        (0xaa, 0x4d, 0x00),
+        (0x10, 0x7d, 0x32),
+        (0x00, 0x7f, 0x70),
+        (0x85, 0x00, 0xd1),
+        (0xc4, 0x15, 0x62),
+    ];
+    let hash = workspace_id
+        .to_string()
+        .bytes()
+        .fold(2_166_136_261_u32, |hash, byte| {
+            (hash ^ u32::from(byte)).wrapping_mul(16_777_619)
+        });
+    let (red, green, blue) = VERCEL_COLORS[hash as usize % VERCEL_COLORS.len()];
+    Color32::from_rgb(red, green, blue)
+}
+
 fn workspace_row(
     ui: &mut egui::Ui,
     workspace: &WorkspaceState,
     index: usize,
     active: bool,
+    context_menu_open: &mut bool,
 ) -> Option<WorkspaceAction> {
     let (rect, response) = ui.allocate_exact_size(
         Vec2::new(ui.available_width(), SIDEBAR_ROW_HEIGHT),
@@ -955,20 +1176,15 @@ fn workspace_row(
     };
     ui.painter().rect_filled(rect, 6.0, fill);
 
-    let content = rect.shrink2(Vec2::new(10.0, 5.0));
-    let status_color = if workspace.any_running() {
-        Color32::from_rgb(70, 167, 88)
-    } else {
-        text_disabled()
-    };
-    ui.painter().circle_filled(
-        egui::pos2(content.left() + 4.0, content.center().y),
-        3.0,
-        status_color,
+    let content = rect.shrink2(Vec2::new(8.0, 4.0));
+    let icon_rect = egui::Rect::from_center_size(
+        egui::pos2(content.left() + 12.0, content.center().y),
+        Vec2::splat(24.0),
     );
+    paint_workspace_icon(ui, icon_rect, workspace);
 
     let text_rect = egui::Rect::from_min_max(
-        egui::pos2(content.left() + 20.0, content.top()),
+        egui::pos2(content.left() + 32.0, content.top()),
         content.max,
     );
     let mut text_ui = ui.new_child(
@@ -978,10 +1194,10 @@ fn workspace_row(
     );
     text_ui.spacing_mut().item_spacing.y = 0.0;
     text_ui.add_sized(
-        [text_rect.width(), 18.0],
+        [text_rect.width(), 17.0],
         egui::Label::new(
             RichText::new(&workspace.model.name)
-                .size(13.0)
+                .size(12.5)
                 .strong()
                 .color(text_primary()),
         )
@@ -989,10 +1205,10 @@ fn workspace_row(
         .truncate(),
     );
     text_ui.add_sized(
-        [text_rect.width(), 16.0],
+        [text_rect.width(), 15.0],
         egui::Label::new(
             RichText::new(compact_path(&workspace.model.root_directory))
-                .size(11.0)
+                .size(10.0)
                 .color(text_secondary()),
         )
         .halign(egui::Align::LEFT)
@@ -1011,6 +1227,7 @@ fn workspace_row(
         ));
     }
     workspace_context_menu(&response, workspace, &mut action);
+    *context_menu_open |= response.context_menu_opened();
     action
 }
 
@@ -1064,6 +1281,24 @@ fn menu_item(
         text,
         FontId::proportional(if height < 36.0 { 13.0 } else { 14.0 }),
         color,
+    );
+    response
+}
+
+fn compact_icon_button(ui: &mut egui::Ui, icon: &str, label: &str) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(24.0), Sense::click());
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
+    });
+    if response.hovered() || response.has_focus() {
+        ui.painter().rect_filled(rect, 6.0, surface_hover());
+    }
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        icon,
+        FontId::proportional(16.0),
+        text_primary(),
     );
     response
 }
@@ -2042,6 +2277,25 @@ mod tests {
     fn compact_text_preserves_short_names_and_truncates_long_ones() {
         assert_eq!(compact_text("workspace", 12), "workspace");
         assert_eq!(compact_text("a very long workspace", 12), "a very lo...");
+    }
+
+    #[test]
+    fn workspace_identity_color_is_stable_and_uses_vercel_palette() {
+        let workspace_id = ade_core::WorkspaceId::new();
+        let color = workspace_identity_color(workspace_id);
+        assert_eq!(color, workspace_identity_color(workspace_id));
+        assert!(
+            [
+                Color32::from_rgb(0x00, 0x59, 0xec),
+                Color32::from_rgb(0xea, 0x00, 0x1d),
+                Color32::from_rgb(0xaa, 0x4d, 0x00),
+                Color32::from_rgb(0x10, 0x7d, 0x32),
+                Color32::from_rgb(0x00, 0x7f, 0x70),
+                Color32::from_rgb(0x85, 0x00, 0xd1),
+                Color32::from_rgb(0xc4, 0x15, 0x62),
+            ]
+            .contains(&color)
+        );
     }
 
     #[test]
