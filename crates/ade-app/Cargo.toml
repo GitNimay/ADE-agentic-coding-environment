@@ -13,6 +13,7 @@ arboard.workspace = true
 crossbeam-channel.workspace = true
 eframe.workspace = true
 rfd.workspace = true
+self_update = { version = "0.44.0", default-features = false, features = ["ureq", "rustls"] }
 vt100.workspace = true
 windows.workspace = true
 

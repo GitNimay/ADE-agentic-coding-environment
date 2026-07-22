@@ -1,48 +1,36 @@
 # Releasing Termy
 
-Termy is currently distributed as a free, unsigned portable Windows ZIP through GitHub Releases.
-Users extract the archive and run `termy.exe`. Windows SmartScreen may show an unknown-publisher
+Termy is distributed as one unsigned Windows executable through GitHub Releases. Users download
+`termy.exe` directly; no ZIP archive is published. Windows SmartScreen may show an unknown-publisher
 warning because the executable does not have a commercial Authenticode certificate.
 
-Every release also includes a SHA-256 checksum. GitHub Actions generates a Sigstore-backed build
-provenance attestation for the ZIP in the public transparency log. A downloaded archive can be
-checked with:
+GitHub Actions generates a Sigstore-backed build-provenance attestation for each executable. A
+download can be checked with:
 
 ```powershell
-Get-FileHash .\termy-windows-x64.zip -Algorithm SHA256
-gh attestation verify .\termy-windows-x64.zip `
+gh attestation verify .\termy.exe `
   --repo GitNimay/ADE-agentic-coding-environment
 ```
 
-## Publish a version
+## Automatic release flow
 
-1. Update `workspace.package.version` in `Cargo.toml` using `MAJOR.MINOR.PATCH` notation.
-2. Run the full checks and commit the resulting `Cargo.lock` update:
+Push the intended commit directly to `main`. The `CI` workflow runs formatting, Clippy, and the full
+test suite. Only after that push's CI run succeeds, `release.yml`:
 
-   ```powershell
-   cargo fmt --all --check
-   cargo clippy --workspace --all-targets --locked -- -D warnings
-   cargo test --workspace --locked
-   ```
+1. checks out the exact verified commit;
+2. derives a unique semantic version from the workspace major/minor version and CI run number;
+3. embeds that release version and builds `ade-app` with the locked dependency graph;
+4. renames the output to `termy.exe`;
+5. records build provenance; and
+6. creates the latest GitHub Release containing only `termy.exe`.
 
-3. After the version commit is on `main`, create and push a matching annotated tag:
-
-   ```powershell
-   git tag -a v0.2.0 -m "Termy 0.2.0"
-   git push origin v0.2.0
-   ```
-
-The tag starts `.github/workflows/release.yml`. It verifies the tag and Cargo versions match,
-re-runs all checks, builds with the locked dependency graph, creates the portable archive and
-checksum, records build provenance, and publishes a GitHub Release with generated notes.
-
-Monitor the run with:
+Monitor the runs with:
 
 ```powershell
-gh run list --workflow release.yml
+gh run list --branch main
 gh run watch --exit-status
 ```
 
-Do not reuse or move a published version tag. Users update manually by replacing `termy.exe` with
-the copy from a newer release; their workspace database remains in the local application-data
-directory.
+Official executables use the embedded CI version to check GitHub's latest release in the background
+at startup. A newer `termy.exe` replaces the current file in place and takes effect on the user's
+next restart. Local builds do not self-update.

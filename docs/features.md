@@ -214,6 +214,10 @@ Input is written to the pane's host-side ConPTY pipe and terminal output is read
 worker. Separate input and output workers prevent one blocked direction from stopping the other.
 Each pane owns a separate pseudoconsole and process tree.
 
+Synchronized-output frames (`CSI ? 2026 h` through `CSI ? 2026 l`) are committed atomically, with
+a bounded timeout for malformed or interrupted streams. This prevents menu redraws from exposing
+half-rendered frames when their bytes arrive in separate pipe reads.
+
 The renderer parses output with `vt100` and draws the terminal cell by cell. It supports:
 
 - ANSI indexed colors and RGB colors;
@@ -262,8 +266,10 @@ Clipboard access failures appear in the in-app error dialog.
 
 Each UI pane maintains up to 10,000 parsed scrollback lines. Scrolling the pointer wheel over a
 pane changes its scrollback position. When the main screen is at the bottom, output is visually
-bottom-anchored; alternate-screen programs and scrolled-back views are rendered from the top of
-the pane instead.
+bottom-anchored by its last rendered row rather than by the application cursor, so moving through
+a selection menu cannot move the viewport. Alternate-screen programs and scrolled-back views are
+rendered from the top. Application terminal modes also suppress shell block decorations so a TUI
+owns its complete grid.
 
 ### 4.6 Automatic terminal sizing
 
@@ -544,13 +550,15 @@ directory instead.
 
 ## 14. Installation and updates
 
-Public releases are intended to be distributed as signed Windows packages through
-`termy.appinstaller`. Windows App Installer handles installation and checks for signed updates at
-launch and in the background. The supported target is Windows 11 x64.
+Every successful CI run caused by a push to `main` publishes `termy.exe` directly in a GitHub
+Release. Official builds check that release feed in a background thread at startup. When a newer
+semantic version exists, the executable is replaced in place without interrupting live terminals;
+the UI asks the user to restart when convenient. Update failures are recorded in the diagnostic
+log and do not prevent startup. The supported target is Windows 11 x64.
 
 The repository also contains `packaging/build-msix.ps1` for producing an unsigned development
-MSIX. That package is for local testing and is not suitable for public installation. See
-[releasing.md](releasing.md) for the signed release workflow.
+MSIX. That package is for local testing and is not part of public releases. See
+[releasing.md](releasing.md) for the automated release workflow.
 
 ## 15. Feature architecture
 

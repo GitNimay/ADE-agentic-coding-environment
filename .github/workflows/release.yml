@@ -1,9 +1,9 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
 
 permissions:
   contents: write
@@ -11,59 +11,61 @@ permissions:
   attestations: write
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-main
   cancel-in-progress: false
 
 jobs:
   release:
-    name: Portable Windows release
+    name: Standalone Windows executable
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main'
     runs-on: windows-latest
     timeout-minutes: 60
 
     steps:
-      - name: Check out tagged source
+      - name: Check out verified main commit
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
 
-      - name: Validate release version
+      - name: Derive automatic release version
         shell: pwsh
         run: |
-          $tag = "${{ github.ref_name }}"
-          if ($tag -notmatch '^v(?<version>\d+\.\d+\.\d+)$') {
-            throw "Release tags must use vMAJOR.MINOR.PATCH (for example, v1.2.3)"
-          }
-          $version = $Matches.version
           $cargoManifest = Get-Content -Raw Cargo.toml
-          $cargoVersion = [regex]::Match(
+          $baseVersion = [regex]::Match(
             $cargoManifest,
             '(?ms)^\[workspace\.package\]\s*.*?^version\s*=\s*"(?<version>\d+\.\d+\.\d+)"'
           ).Groups['version'].Value
-          if ($version -ne $cargoVersion) {
-            throw "Tag version $version does not match Cargo.toml version $cargoVersion"
+          if (-not $baseVersion) {
+            throw "Could not read workspace.package.version from Cargo.toml"
           }
-          "TERMY_VERSION=$version" >> $env:GITHUB_ENV
+          $parts = $baseVersion.Split('.')
+          $patch = ([int]$parts[2] * 100000) + [int]"${{ github.event.workflow_run.run_number }}"
+          $version = "$($parts[0]).$($parts[1]).$patch"
+          "TERMY_BUILD_VERSION=$version" >> $env:GITHUB_ENV
+          "TERMY_RELEASE_TAG=v$version" >> $env:GITHUB_ENV
 
-      - name: Run release checks
-        run: |
-          cargo fmt --all --check
-          cargo clippy --workspace --all-targets --locked -- -D warnings
-          cargo test --workspace --locked
+      - name: Build standalone executable
+        run: cargo build --release --locked -p ade-app
 
-      - name: Build portable Windows archive
+      - name: Stage executable
         shell: pwsh
-        run: ./packaging/build-portable.ps1 -Version $env:TERMY_VERSION
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target/release/ade-app.exe dist/termy.exe
 
       - name: Attest build provenance
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
-          subject-path: dist/termy-windows-x64.zip
+          subject-path: dist/termy.exe
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: termy-${{ env.TERMY_VERSION }}-windows-x64
-          path: |
-            dist/termy-windows-x64.zip
-            dist/termy-windows-x64.zip.sha256
+          name: termy-ci-${{ github.event.workflow_run.run_number }}-windows-x64
+          path: dist/termy.exe
           if-no-files-found: error
           retention-days: 14
 
@@ -72,19 +74,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release view "${{ github.ref_name }}" *> $null
+          gh release view $env:TERMY_RELEASE_TAG *> $null
           if ($LASTEXITCODE -eq 0) {
-            gh release upload "${{ github.ref_name }}" `
-              dist/termy-windows-x64.zip `
-              dist/termy-windows-x64.zip.sha256 `
-              --clobber
+            gh release upload $env:TERMY_RELEASE_TAG dist/termy.exe --clobber
           } else {
-            gh release create "${{ github.ref_name }}" `
-              dist/termy-windows-x64.zip `
-              dist/termy-windows-x64.zip.sha256 `
-              --verify-tag `
+            gh release create $env:TERMY_RELEASE_TAG dist/termy.exe `
+              --target "${{ github.event.workflow_run.head_sha }}" `
               --generate-notes `
-              --title "Termy $env:TERMY_VERSION"
+              --latest `
+              --title "Termy $env:TERMY_BUILD_VERSION"
           }
           if ($LASTEXITCODE -ne 0) {
             throw "GitHub Release publication failed"

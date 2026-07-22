@@ -14,7 +14,7 @@ use ade_protocol::{
 };
 use ade_pty::{ConPtySession, PtySize, SpawnCommand};
 use ade_storage::Repository;
-use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, bounded};
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, bounded, unbounded};
 use windows::Win32::Foundation::{
     CloseHandle, ERROR_ALREADY_EXISTS, ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED, GENERIC_READ,
     GetLastError, HANDLE, INVALID_HANDLE_VALUE,
@@ -90,7 +90,11 @@ struct OutputHub {
 }
 
 impl OutputHub {
-    fn append(&mut self, pane_id: PaneId, bytes: &[u8]) {
+    fn append(
+        &mut self,
+        pane_id: PaneId,
+        bytes: &[u8],
+    ) -> Option<(Sender<ServerEvent>, ServerEvent)> {
         let buffer = self.buffers.entry(pane_id).or_default();
         if bytes.len() >= OUTPUT_LIMIT {
             buffer.clear();
@@ -103,10 +107,15 @@ impl OutputHub {
             buffer.drain(..excess);
             buffer.extend(bytes);
         }
-        self.emit(ServerEvent::TerminalOutput {
-            pane_id,
-            data: bytes.to_vec(),
-        });
+        self.client.as_ref().map(|(_, client)| {
+            (
+                client.clone(),
+                ServerEvent::TerminalOutput {
+                    pane_id,
+                    data: bytes.to_vec(),
+                },
+            )
+        })
     }
 
     fn emit(&mut self, event: ServerEvent) {
@@ -259,6 +268,9 @@ fn serve_client(pipe: File, shared: &Arc<Shared>) -> Result<(), DaemonError> {
             writer: raw_handle,
         },
     );
+    // PTY output is a byte stream: dropping one queued event can split an ANSI control sequence
+    // and permanently desynchronize the client's terminal parser. The per-pane reader blocks on
+    // this bounded hop when necessary, preserving bytes without unbounded buffering.
     let (event_tx, event_rx) = bounded(CLIENT_EVENT_CAPACITY);
     let mut pipe = pipe;
     let mut attached_client_id = None;
@@ -289,7 +301,8 @@ fn client_loop(
     attached_client_id: &mut Option<u64>,
 ) -> Result<(), DaemonError> {
     loop {
-        for event in event_rx.try_iter() {
+        // Keep request handling responsive even while a process continuously produces output.
+        for event in event_rx.try_iter().take(CLIENT_EVENT_CAPACITY) {
             write_frame(reader, &Versioned::new(event))?;
         }
         match pipe_bytes_available(reader) {
@@ -473,7 +486,9 @@ fn spawn_pane(shared: &Arc<Shared>, pane_id: PaneId) -> Result<(), DaemonError> 
     let mut reader = session.take_reader()?;
     let mut writer = session.take_writer()?;
     let (input_tx, input_rx) = bounded::<Vec<u8>>(CLIENT_EVENT_CAPACITY);
-    let (control_tx, control_rx) = bounded::<Control>(16);
+    // Window drags can produce sizes faster than ConPTY can apply them. Never block input/output
+    // behind stale geometry; the control worker below coalesces resize bursts to the newest size.
+    let (control_tx, control_rx) = unbounded::<Control>();
 
     let output_shared = Arc::clone(shared);
     thread::spawn(move || {
@@ -483,7 +498,12 @@ fn spawn_pane(shared: &Arc<Shared>, pane_id: PaneId) -> Result<(), DaemonError> 
             if read == 0 {
                 break;
             }
-            lock(&output_shared.output).append(pane_id, &buffer[..read]);
+            let output = lock(&output_shared.output).append(pane_id, &buffer[..read]);
+            if let Some((client, event)) = output
+                && client.send(event).is_err()
+            {
+                break;
+            }
             if let Some(cwd) = cwd_tracker.process(&buffer[..read]) {
                 update_pane_cwd(&output_shared, pane_id, cwd);
             }
@@ -557,7 +577,20 @@ fn control_session(
 ) {
     loop {
         match receiver.recv_timeout(Duration::from_millis(200)) {
-            Ok(Control::Resize(size)) => {
+            Ok(Control::Resize(mut size)) => {
+                let mut stop = false;
+                for pending in receiver.try_iter() {
+                    match pending {
+                        Control::Resize(newest) => size = newest,
+                        Control::Stop => {
+                            stop = true;
+                            break;
+                        }
+                    }
+                }
+                if stop {
+                    return;
+                }
                 if session.resize(size).is_err() {
                     break;
                 }
@@ -745,7 +778,7 @@ mod tests {
     fn replacing_attached_client_keeps_broadcasts_on_new_subscriber() {
         let mut output = OutputHub::default();
         let pane_id = PaneId::new();
-        output.append(pane_id, b"buffered");
+        let _ = output.append(pane_id, b"buffered");
 
         let (first_tx, first_rx) = bounded(4);
         let (first_id, replay) = output.replay_for_attach(AppSnapshot::default());

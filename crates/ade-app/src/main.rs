@@ -41,6 +41,10 @@ const TERMINAL_DIVIDER_OFFSET: f32 = 7.0;
 const TERMINAL_REVEAL_DURATION: Duration = Duration::from_millis(160);
 const TERMINAL_REVEAL_OFFSET: f32 = 4.0;
 const TERMINAL_CLOSE_DURATION: Duration = Duration::from_millis(220);
+const SYNCHRONIZED_OUTPUT_TIMEOUT: Duration = Duration::from_millis(150);
+const SYNCHRONIZED_OUTPUT_LIMIT: usize = 1024 * 1024;
+const SYNCHRONIZED_OUTPUT_BEGIN: &[u8] = b"\x1b[?2026h";
+const SYNCHRONIZED_OUTPUT_END: &[u8] = b"\x1b[?2026l";
 const SIDEBAR_BREAKPOINT: f32 = 600.0;
 const SIDEBAR_WIDTH: f32 = 256.0;
 const TABLET_SIDEBAR_WIDTH: f32 = 224.0;
@@ -53,6 +57,32 @@ const SIDEBAR_CLOSE_DELAY: Duration = Duration::from_millis(450);
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const DETACHED_PROCESS: u32 = 0x0000_0008;
+const RELEASE_REPOSITORY_OWNER: &str = "GitNimay";
+const RELEASE_REPOSITORY_NAME: &str = "ADE-agentic-coding-environment";
+
+enum UpdateNotice {
+    Installed(String),
+}
+
+fn official_build_version() -> Option<&'static str> {
+    option_env!("TERMY_BUILD_VERSION")
+}
+
+fn install_latest_release(
+    current_version: &str,
+) -> Result<self_update::Status, self_update::errors::Error> {
+    self_update::backends::github::Update::configure()
+        .repo_owner(RELEASE_REPOSITORY_OWNER)
+        .repo_name(RELEASE_REPOSITORY_NAME)
+        .bin_name("termy")
+        .identifier("termy.exe")
+        .current_version(current_version)
+        .no_confirm(true)
+        .show_output(false)
+        .show_download_progress(false)
+        .build()?
+        .update()
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::args_os().any(|argument| argument == "--daemon") {
@@ -240,6 +270,8 @@ struct AdeApp {
     sidebar_hover_started: Option<Instant>,
     sidebar_left_at: Option<Instant>,
     terminal_limit_popup: bool,
+    update_results: Receiver<UpdateNotice>,
+    update_message: Option<String>,
 }
 
 impl AdeApp {
@@ -247,6 +279,20 @@ impl AdeApp {
         configure_style(&creation_context.egui_ctx);
         let client = DaemonClient::connect(&creation_context.egui_ctx);
         let error_message = client.as_ref().err().map(ToString::to_string);
+        let (update_sender, update_results) = unbounded();
+        if let Some(version) = official_build_version() {
+            let repaint_context = creation_context.egui_ctx.clone();
+            let _ = thread::Builder::new()
+                .name("termy-auto-update".to_owned())
+                .spawn(move || match install_latest_release(version) {
+                    Ok(self_update::Status::Updated(updated_version)) => {
+                        let _ = update_sender.send(UpdateNotice::Installed(updated_version));
+                        repaint_context.request_repaint();
+                    }
+                    Ok(self_update::Status::UpToDate(_)) => {}
+                    Err(error) => diagnostic_log(&format!("automatic update failed: {error}")),
+                });
+        }
         let mut app = Self {
             workspaces: Vec::new(),
             active_workspace: 0,
@@ -261,6 +307,8 @@ impl AdeApp {
             sidebar_hover_started: None,
             sidebar_left_at: None,
             terminal_limit_popup: false,
+            update_results,
+            update_message: None,
         };
         app.send(ClientRequest::Attach);
         app
@@ -274,6 +322,30 @@ impl AdeApp {
         if client.send(request).is_err() {
             self.error_message = Some("The termy background daemon disconnected".to_owned());
         }
+    }
+
+    fn drain_update_results(&mut self) {
+        while let Ok(UpdateNotice::Installed(version)) = self.update_results.try_recv() {
+            self.update_message = Some(format!(
+                "Termy {version} was installed. Restart Termy when convenient to use it."
+            ));
+        }
+    }
+
+    fn show_update_notice(&mut self, context: &egui::Context) {
+        let Some(message) = self.update_message.clone() else {
+            return;
+        };
+        egui::Window::new("Update installed")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::RIGHT_BOTTOM, Vec2::new(-16.0, -44.0))
+            .show(context, |ui| {
+                ui.label(message);
+                if ui.button("Dismiss").clicked() {
+                    self.update_message = None;
+                }
+            });
     }
 
     fn create_workspace(&mut self, name: String, root: &Path, _context: &egui::Context) {
@@ -1056,6 +1128,7 @@ impl AdeApp {
 impl eframe::App for AdeApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let context = ui.ctx().clone();
+        self.drain_update_results();
         self.drain_daemon_events(&context);
         self.handle_shortcuts(&context);
         self.finish_pane_closes(&context);
@@ -1142,10 +1215,13 @@ impl eframe::App for AdeApp {
                     }
                 });
         }
+        self.show_update_notice(&context);
         self.show_terminal_limit_popup(&context);
         self.workspace_dialogs(&context);
         self.command_palette(&context);
-        context.request_repaint_after(Duration::from_millis(33));
+        // Terminal output and user input request repaints immediately. A slow idle tick is enough
+        // for background metadata and avoids rebuilding a full terminal grid 30 times per second.
+        context.request_repaint_after(GIT_REFRESH_INTERVAL);
     }
 }
 
@@ -1936,6 +2012,8 @@ struct TerminalPane {
     columns: u16,
     rows: u16,
     selection: Option<TerminalSelection>,
+    pending_output: Vec<u8>,
+    synchronized_output_since: Option<Instant>,
     reveal_started_at: Instant,
     close_started_at: Option<Instant>,
     close_request_sent: bool,
@@ -1977,6 +2055,8 @@ impl TerminalPane {
             columns: metadata.cols,
             rows: metadata.rows,
             selection: None,
+            pending_output: Vec::new(),
+            synchronized_output_since: None,
             reveal_started_at: Instant::now(),
             close_started_at: None,
             close_request_sent: false,
@@ -2037,7 +2117,57 @@ impl TerminalPane {
     }
 
     fn process_output(&mut self, data: &[u8]) {
-        self.parser.process(data);
+        self.pending_output.extend_from_slice(data);
+        self.process_complete_output_frames();
+    }
+
+    fn process_complete_output_frames(&mut self) {
+        loop {
+            if self.synchronized_output_since.is_some() {
+                if let Some(end) = find_bytes(&self.pending_output, SYNCHRONIZED_OUTPUT_END) {
+                    let frame_end = end + SYNCHRONIZED_OUTPUT_END.len();
+                    self.parser.process(&self.pending_output[..frame_end]);
+                    self.pending_output.drain(..frame_end);
+                    self.synchronized_output_since = None;
+                    continue;
+                }
+                if self.pending_output.len() >= SYNCHRONIZED_OUTPUT_LIMIT
+                    || self
+                        .synchronized_output_since
+                        .is_some_and(|started| started.elapsed() >= SYNCHRONIZED_OUTPUT_TIMEOUT)
+                {
+                    self.parser.process(&self.pending_output);
+                    self.pending_output.clear();
+                    self.synchronized_output_since = None;
+                }
+                return;
+            }
+
+            if let Some(begin) = find_bytes(&self.pending_output, SYNCHRONIZED_OUTPUT_BEGIN) {
+                self.parser.process(&self.pending_output[..begin]);
+                self.pending_output.drain(..begin);
+                self.synchronized_output_since = Some(Instant::now());
+                continue;
+            }
+
+            let retained = partial_sequence_suffix(&self.pending_output, SYNCHRONIZED_OUTPUT_BEGIN);
+            let process_end = self.pending_output.len() - retained;
+            self.parser.process(&self.pending_output[..process_end]);
+            self.pending_output.drain(..process_end);
+            return;
+        }
+    }
+
+    fn flush_expired_synchronized_output(&mut self, context: &egui::Context) {
+        let Some(started) = self.synchronized_output_since else {
+            return;
+        };
+        let elapsed = started.elapsed();
+        if elapsed >= SYNCHRONIZED_OUTPUT_TIMEOUT {
+            self.process_complete_output_frames();
+        } else {
+            context.request_repaint_after(SYNCHRONIZED_OUTPUT_TIMEOUT.saturating_sub(elapsed));
+        }
     }
 
     fn send(&self, requests: &Sender<ClientRequest>, bytes: impl Into<Vec<u8>>) {
@@ -2270,6 +2400,7 @@ fn terminal_pane_ui(
     accept_input: bool,
 ) {
     ui.painter().rect_filled(rect, 0.0, terminal_background());
+    pane.flush_expired_synchronized_output(ui.ctx());
     pane.refresh_git_status();
     let footer_top = (rect.bottom() - TERMINAL_FOOTER_HEIGHT).max(rect.top());
     let footer_rect = egui::Rect::from_min_max(egui::pos2(rect.left(), footer_top), rect.max);
@@ -2301,18 +2432,20 @@ fn terminal_pane_ui(
     let (cursor_row, cursor_column) = screen.cursor_position();
     let divider_rows = terminal_divider_rows(screen);
     let bottom_anchored = !screen.alternate_screen() && screen.scrollback() == 0;
+    let block_chrome = bottom_anchored && !terminal_application_mode(screen);
+    let visual_end_row = terminal_visual_end_row(screen);
     let grid_origin = egui::pos2(
         snap_to_pixel(content_rect.left(), pixels_per_point),
         if bottom_anchored {
             snap_to_pixel(
-                content_rect.bottom() - f32::from(cursor_row.saturating_add(1)) * cell_height,
+                content_rect.bottom() - f32::from(visual_end_row.saturating_add(1)) * cell_height,
                 pixels_per_point,
             )
         } else {
             snap_to_pixel(content_rect.top(), pixels_per_point)
         },
     );
-    let current_block_top = if bottom_anchored {
+    let current_block_top = if block_chrome {
         divider_rows.last().map(|row| {
             snap_to_pixel(
                 grid_origin.y + f32::from(row.saturating_add(1)) * cell_height
@@ -2324,25 +2457,14 @@ fn terminal_pane_ui(
         None
     };
 
-    if bottom_anchored {
-        let fallback_dock_top =
-            grid_origin.y + f32::from(cursor_row) * cell_height - TERMINAL_DIVIDER_OFFSET;
-        let dock_top = current_block_top
-            .map_or(fallback_dock_top, |top| top + 2.0 * cell_height)
-            .max(content_rect.top());
+    if block_chrome && let Some(current_block_top) = current_block_top {
+        let dock_top = (current_block_top + 2.0 * cell_height).max(content_rect.top());
         let dock_rect = egui::Rect::from_min_max(
             egui::pos2(rect.left(), dock_top),
             egui::pos2(rect.right(), footer_top),
         );
         ui.painter()
             .rect_filled(dock_rect, 0.0, terminal_background());
-        if current_block_top.is_none() {
-            ui.painter().hline(
-                dock_rect.x_range(),
-                dock_rect.top(),
-                Stroke::new(1.0, terminal_divider_color()),
-            );
-        }
         if active {
             ui.painter().rect_filled(
                 egui::Rect::from_min_size(
@@ -2371,7 +2493,7 @@ fn terminal_pane_ui(
             pixels_per_point,
         );
         if (rect.top()..=rect.bottom()).contains(&y) {
-            let current = index + 1 == divider_rows.len() && bottom_anchored;
+            let current = index + 1 == divider_rows.len() && block_chrome;
             if !current {
                 divider_painter.hline(rect.x_range(), y, divider_stroke);
             }
@@ -2773,6 +2895,8 @@ fn terminal_layout_job(
 
     for row in 0..rows {
         let divider_row = is_terminal_divider_row(screen, row);
+        let mut run_text = String::new();
+        let mut run_format = None;
         for column in 0..columns {
             let Some(cell) = screen.cell(row, column) else {
                 continue;
@@ -2807,25 +2931,27 @@ fn terminal_layout_job(
             if cell.dim() {
                 foreground = foreground.gamma_multiply(0.65);
             }
-            job.append(
-                text,
-                0.0,
-                TextFormat {
-                    font_id: FontId::new(TERMINAL_FONT_SIZE, FontFamily::Monospace),
-                    line_height: Some(cell_height),
-                    color: foreground,
-                    background,
-                    expand_bg: 0.5,
-                    italics: cell.italic(),
-                    underline: if cell.underline() {
-                        Stroke::new(1.0, foreground)
-                    } else {
-                        Stroke::NONE
-                    },
-                    ..Default::default()
+            let format = TextFormat {
+                font_id: FontId::new(TERMINAL_FONT_SIZE, FontFamily::Monospace),
+                line_height: Some(cell_height),
+                color: foreground,
+                background,
+                expand_bg: 0.5,
+                italics: cell.italic(),
+                underline: if cell.underline() {
+                    Stroke::new(1.0, foreground)
+                } else {
+                    Stroke::NONE
                 },
-            );
+                ..Default::default()
+            };
+            if run_format.as_ref() != Some(&format) {
+                append_terminal_run(&mut job, &mut run_text, run_format.take());
+                run_format = Some(format);
+            }
+            run_text.push_str(text);
         }
+        append_terminal_run(&mut job, &mut run_text, run_format);
         if row + 1 < rows {
             job.append(
                 "\n",
@@ -2842,11 +2968,56 @@ fn terminal_layout_job(
     job
 }
 
+fn append_terminal_run(job: &mut LayoutJob, text: &mut String, format: Option<TextFormat>) {
+    if let Some(format) = format
+        && !text.is_empty()
+    {
+        job.append(text, 0.0, format);
+        text.clear();
+    }
+}
+
 fn terminal_divider_rows(screen: &vt100::Screen) -> Vec<u16> {
     let (rows, _) = screen.size();
     (0..rows)
         .filter(|&row| is_terminal_divider_row(screen, row))
         .collect()
+}
+
+fn terminal_application_mode(screen: &vt100::Screen) -> bool {
+    screen.alternate_screen()
+        || screen.hide_cursor()
+        || screen.application_cursor()
+        || screen.application_keypad()
+}
+
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+fn partial_sequence_suffix(bytes: &[u8], sequence: &[u8]) -> usize {
+    (1..sequence.len())
+        .rev()
+        .find(|&length| bytes.ends_with(&sequence[..length]))
+        .unwrap_or(0)
+}
+
+fn terminal_visual_end_row(screen: &vt100::Screen) -> u16 {
+    let (rows, columns) = screen.size();
+    (0..rows)
+        .rev()
+        .find(|&row| {
+            (0..columns).any(|column| {
+                screen.cell(row, column).is_some_and(|cell| {
+                    cell.has_contents()
+                        || cell.inverse()
+                        || !matches!(cell.bgcolor(), vt100::Color::Default)
+                })
+            })
+        })
+        .unwrap_or(0)
 }
 
 fn is_terminal_divider_row(screen: &vt100::Screen, row: u16) -> bool {
@@ -3504,6 +3675,58 @@ mod tests {
         assert_eq!(terminal_divider_rows(parser.screen()), vec![1]);
         assert!(!is_terminal_divider_row(parser.screen(), 0));
         assert!(!is_terminal_divider_row(parser.screen(), 2));
+    }
+
+    #[test]
+    fn cursor_motion_does_not_move_the_visual_grid() {
+        let mut parser = vt100::Parser::new(12, 80, 100);
+        parser.process(b"menu\r\n  first\r\n  second");
+        assert_eq!(terminal_visual_end_row(parser.screen()), 2);
+
+        parser.process(b"\x1b[1;1H\x1b[3;4H\x1b[2;2H");
+        assert_eq!(parser.screen().cursor_position(), (1, 1));
+        assert_eq!(terminal_visual_end_row(parser.screen()), 2);
+    }
+
+    #[test]
+    fn tui_modes_disable_shell_block_chrome() {
+        let mut parser = vt100::Parser::new(12, 80, 100);
+        assert!(!terminal_application_mode(parser.screen()));
+        parser.process(b"\x1b[?25l");
+        assert!(terminal_application_mode(parser.screen()));
+    }
+
+    #[test]
+    fn synchronized_tui_output_is_applied_as_one_frame() {
+        let metadata = PaneSnapshot {
+            id: PaneId::new(),
+            workspace_id: ade_core::WorkspaceId::new(),
+            cwd: PathBuf::from("."),
+            process_label: "test".to_owned(),
+            cols: 80,
+            rows: 12,
+            status: SessionStatus::Running,
+        };
+        let mut pane = TerminalPane::new(&metadata);
+
+        pane.process_output(b"\x1b[?20");
+        pane.process_output(b"26hmenu\r\n  first");
+        assert!(pane.parser.screen().contents().is_empty());
+
+        pane.process_output(b"\r\n  second\x1b[?2026l");
+        assert!(pane.parser.screen().contents().contains("menu"));
+        assert!(pane.parser.screen().contents().contains("second"));
+        assert!(pane.pending_output.is_empty());
+        assert!(pane.synchronized_output_since.is_none());
+    }
+
+    #[test]
+    fn terminal_layout_coalesces_cells_with_identical_formatting() {
+        let mut parser = vt100::Parser::new(12, 80, 100);
+        parser.process(b"one uniformly formatted line");
+        let job = terminal_layout_job(&parser, None, 18.0);
+
+        assert!(job.sections.len() < 30, "sections: {}", job.sections.len());
     }
 
     #[test]

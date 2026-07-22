@@ -60,6 +60,12 @@ is parsed with `vt100` as an interim state engine and rendered cell-by-cell with
 RGB colors. This parser will be replaced behind the terminal engine boundary when libghostty is
 available.
 
+PTY output delivery is lossless: terminal byte chunks are never discarded between the daemon and
+UI because losing part of an escape sequence would desynchronize the parser. Resize bursts are
+coalesced on the ConPTY control worker so interactive input and output do not wait behind obsolete
+intermediate window sizes. DEC synchronized-output frames are buffered until their end marker (or
+a safety timeout) so compatible TUIs redraw atomically.
+
 ## Terminal Engine Boundary
 
 `libghostty-vt` remains the selected terminal state engine, but it is not integrated yet because
