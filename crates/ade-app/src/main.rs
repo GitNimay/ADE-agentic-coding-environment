@@ -35,6 +35,7 @@ const MIN_PANE_HEIGHT: f32 = 120.0;
 const TERMINAL_SIDE_PADDING: f32 = 10.0;
 const TERMINAL_BOTTOM_PADDING: f32 = 10.0;
 const TERMINAL_FOOTER_HEIGHT: f32 = 28.0;
+const GIT_REFRESH_INTERVAL: Duration = Duration::from_millis(1500);
 const TERMINAL_DIVIDER_MARKER: &str = "__ADE_BLOCK_DIVIDER__";
 const TERMINAL_DIVIDER_OFFSET: f32 = 7.0;
 const TERMINAL_REVEAL_DURATION: Duration = Duration::from_millis(160);
@@ -1938,6 +1939,21 @@ struct TerminalPane {
     reveal_started_at: Instant,
     close_started_at: Option<Instant>,
     close_request_sent: bool,
+    cwd: PathBuf,
+    git_status: Option<GitStatus>,
+    git_refresh_pending: bool,
+    git_last_refreshed: Option<Instant>,
+    git_results: Receiver<(PathBuf, Option<GitStatus>)>,
+    git_result_sender: Sender<(PathBuf, Option<GitStatus>)>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct GitStatus {
+    branch: String,
+    changed_files: usize,
+    additions: usize,
+    deletions: usize,
+    github_remote: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -1954,6 +1970,7 @@ struct TerminalSelection {
 
 impl TerminalPane {
     fn new(metadata: &PaneSnapshot) -> Self {
+        let (git_result_sender, git_results) = unbounded();
         Self {
             id: metadata.id,
             parser: vt100::Parser::new(metadata.rows, metadata.cols, SCROLLBACK_LINES),
@@ -1964,6 +1981,12 @@ impl TerminalPane {
             reveal_started_at: Instant::now(),
             close_started_at: None,
             close_request_sent: false,
+            cwd: metadata.cwd.clone(),
+            git_status: None,
+            git_refresh_pending: false,
+            git_last_refreshed: None,
+            git_results,
+            git_result_sender,
         }
     }
 
@@ -1981,6 +2004,37 @@ impl TerminalPane {
 
     fn update_metadata(&mut self, metadata: &PaneSnapshot) {
         self.status = metadata.status.clone();
+        if self.cwd != metadata.cwd {
+            self.cwd.clone_from(&metadata.cwd);
+            self.git_status = None;
+            self.git_last_refreshed = None;
+            self.git_refresh_pending = false;
+        }
+    }
+
+    fn refresh_git_status(&mut self) {
+        while let Ok((cwd, status)) = self.git_results.try_recv() {
+            if cwd == self.cwd {
+                self.git_status = status;
+                self.git_last_refreshed = Some(Instant::now());
+                self.git_refresh_pending = false;
+            }
+        }
+        let due = self
+            .git_last_refreshed
+            .is_none_or(|last| last.elapsed() >= GIT_REFRESH_INTERVAL);
+        if self.git_refresh_pending || !due {
+            return;
+        }
+        self.git_refresh_pending = true;
+        let cwd = self.cwd.clone();
+        let sender = self.git_result_sender.clone();
+        let _ = thread::Builder::new()
+            .name(format!("ade-git-status-{}", self.id))
+            .spawn(move || {
+                let status = read_git_status(&cwd);
+                let _ = sender.send((cwd, status));
+            });
     }
 
     fn process_output(&mut self, data: &[u8]) {
@@ -2217,6 +2271,7 @@ fn terminal_pane_ui(
     accept_input: bool,
 ) {
     ui.painter().rect_filled(rect, 0.0, terminal_background());
+    pane.refresh_git_status();
     let footer_top = (rect.bottom() - TERMINAL_FOOTER_HEIGHT).max(rect.top());
     let footer_rect = egui::Rect::from_min_max(egui::pos2(rect.left(), footer_top), rect.max);
     let content_min = egui::pos2(
@@ -2245,6 +2300,7 @@ fn terminal_pane_ui(
 
     let screen = pane.parser.screen();
     let (cursor_row, cursor_column) = screen.cursor_position();
+    let divider_rows = terminal_divider_rows(screen);
     let bottom_anchored = !screen.alternate_screen() && screen.scrollback() == 0;
     let grid_origin = egui::pos2(
         snap_to_pixel(content_rect.left(), pixels_per_point),
@@ -2294,7 +2350,8 @@ fn terminal_pane_ui(
         .galley(grid_origin, galley, Color32::WHITE);
     let divider_stroke = Stroke::new(1.0, terminal_divider_color());
     let divider_painter = ui.painter().with_clip_rect(rect);
-    for row in terminal_divider_rows(screen) {
+    let mut current_header_y = None;
+    for (index, row) in divider_rows.iter().copied().enumerate() {
         let y = snap_to_pixel(
             grid_origin.y + f32::from(row.saturating_add(1)) * cell_height
                 - TERMINAL_DIVIDER_OFFSET,
@@ -2302,7 +2359,20 @@ fn terminal_pane_ui(
         );
         if (rect.top()..=rect.bottom()).contains(&y) {
             divider_painter.hline(rect.x_range(), y, divider_stroke);
+            if index + 1 == divider_rows.len() && bottom_anchored {
+                current_header_y = Some(y + cell_height * 0.9);
+            }
         }
+    }
+    if let Some(header_y) = current_header_y {
+        paint_command_header(
+            ui,
+            rect,
+            header_y,
+            &pane.cwd,
+            pane.git_status.as_ref(),
+            active,
+        );
     }
     let response = ui.interact(
         content_rect,
@@ -2394,12 +2464,10 @@ fn terminal_pane_ui(
 }
 
 fn paint_terminal_footer(ui: &mut egui::Ui, rect: egui::Rect, active: bool) {
-    ui.painter()
-        .rect_filled(rect, 0.0, Color32::from_rgb(5, 5, 5));
     ui.painter().hline(
         rect.x_range(),
         rect.top(),
-        Stroke::new(1.0, Color32::from_rgb(28, 28, 28)),
+        Stroke::new(1.0, Color32::from_rgb(38, 38, 38)),
     );
 
     let key_color = if active {
@@ -2436,6 +2504,267 @@ fn paint_terminal_footer(ui: &mut egui::Ui, rect: egui::Rect, active: bool) {
             label_color,
         );
     }
+}
+
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::too_many_lines
+)]
+fn paint_command_header(
+    ui: &mut egui::Ui,
+    pane_rect: egui::Rect,
+    center_y: f32,
+    cwd: &Path,
+    git: Option<&GitStatus>,
+    active: bool,
+) {
+    const CHIP_HEIGHT: f32 = 24.0;
+    const GAP: f32 = 8.0;
+    let clip = ui.painter().with_clip_rect(pane_rect);
+    clip.hline(
+        pane_rect.x_range(),
+        center_y,
+        Stroke::new(1.0, Color32::from_rgb(46, 46, 46)),
+    );
+
+    let left = pane_rect.left() + TERMINAL_SIDE_PADDING;
+    let right = pane_rect.right() - TERMINAL_SIDE_PADDING;
+    let available = (right - left).max(0.0);
+    let max_path_width = (available * if git.is_some() { 0.48 } else { 0.72 })
+        .clamp(96.0, 360.0)
+        .min(available);
+    let max_path_chars = ((max_path_width - 34.0) / 7.5).max(4.0) as usize;
+    let path_label = compact_header_path(cwd, max_path_chars);
+    let font = FontId::new(13.0, FontFamily::Monospace);
+    let path_text_width = ui.fonts_mut(|fonts| {
+        fonts
+            .layout_no_wrap(path_label.clone(), font.clone(), text_primary())
+            .size()
+            .x
+    });
+    let path_width = (path_text_width + 34.0).min(max_path_width);
+    let path_rect = egui::Rect::from_min_size(
+        egui::pos2(left, center_y - CHIP_HEIGHT / 2.0),
+        Vec2::new(path_width, CHIP_HEIGHT),
+    );
+    paint_header_chip(
+        &clip,
+        path_rect,
+        Color32::BLACK,
+        if active {
+            Color32::from_rgb(72, 72, 72)
+        } else {
+            Color32::from_rgb(46, 46, 46)
+        },
+    );
+    paint_folder_icon(
+        &clip,
+        egui::pos2(path_rect.left() + 8.0, path_rect.center().y),
+        if active {
+            text_primary()
+        } else {
+            text_secondary()
+        },
+    );
+    clip.text(
+        egui::pos2(path_rect.left() + 25.0, path_rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        path_label,
+        font.clone(),
+        if active {
+            text_primary()
+        } else {
+            text_secondary()
+        },
+    );
+
+    let Some(git) = git else {
+        return;
+    };
+    let mut x = path_rect.right() + GAP;
+    let remaining = right - x;
+    if remaining < 86.0 {
+        return;
+    }
+    let branch_label = compact_text(&git.branch, if remaining < 220.0 { 10 } else { 20 });
+    let branch_text_width = ui.fonts_mut(|fonts| {
+        fonts
+            .layout_no_wrap(
+                branch_label.clone(),
+                font.clone(),
+                Color32::from_rgb(151, 211, 142),
+            )
+            .size()
+            .x
+    });
+    let branch_width = (branch_text_width + if git.github_remote { 46.0 } else { 31.0 })
+        .min((remaining * 0.6).max(78.0));
+    let branch_rect = egui::Rect::from_min_size(
+        egui::pos2(x, center_y - CHIP_HEIGHT / 2.0),
+        Vec2::new(branch_width, CHIP_HEIGHT),
+    );
+    paint_header_chip(
+        &clip,
+        branch_rect,
+        Color32::from_rgb(8, 18, 10),
+        Color32::from_rgb(35, 65, 39),
+    );
+    let git_green = Color32::from_rgb(151, 211, 142);
+    if git.github_remote {
+        paint_github_mark(
+            &clip,
+            egui::pos2(branch_rect.left() + 8.0, branch_rect.center().y),
+            git_green,
+        );
+        paint_git_branch_icon(
+            &clip,
+            egui::pos2(branch_rect.left() + 23.0, branch_rect.center().y),
+            git_green,
+        );
+    } else {
+        paint_git_branch_icon(
+            &clip,
+            egui::pos2(branch_rect.left() + 8.0, branch_rect.center().y),
+            git_green,
+        );
+    }
+    clip.text(
+        egui::pos2(
+            branch_rect.left() + if git.github_remote { 38.0 } else { 23.0 },
+            branch_rect.center().y,
+        ),
+        egui::Align2::LEFT_CENTER,
+        branch_label,
+        font.clone(),
+        git_green,
+    );
+    x = branch_rect.right() + GAP;
+
+    let stats_width = right - x;
+    if stats_width < 38.0 {
+        return;
+    }
+    paint_file_icon(
+        &clip,
+        egui::pos2(x, center_y),
+        Color32::from_rgb(145, 145, 145),
+    );
+    x += 16.0;
+    clip.text(
+        egui::pos2(x, center_y),
+        egui::Align2::LEFT_CENTER,
+        git.changed_files.to_string(),
+        font.clone(),
+        Color32::from_rgb(175, 175, 175),
+    );
+    if stats_width >= 94.0 {
+        x += 28.0;
+        clip.text(
+            egui::pos2(x, center_y),
+            egui::Align2::LEFT_CENTER,
+            format!("+{}", git.additions),
+            font.clone(),
+            Color32::from_rgb(82, 196, 92),
+        );
+        x += 43.0;
+        clip.text(
+            egui::pos2(x, center_y),
+            egui::Align2::LEFT_CENTER,
+            format!("-{}", git.deletions),
+            font,
+            Color32::from_rgb(238, 91, 91),
+        );
+    }
+}
+
+fn paint_header_chip(painter: &egui::Painter, rect: egui::Rect, fill: Color32, stroke: Color32) {
+    painter.rect(
+        rect,
+        4.0,
+        fill,
+        Stroke::new(1.0, stroke),
+        egui::StrokeKind::Inside,
+    );
+}
+
+fn paint_folder_icon(painter: &egui::Painter, origin: egui::Pos2, color: Color32) {
+    let points = [
+        origin + Vec2::new(0.0, -5.0),
+        origin + Vec2::new(5.0, -5.0),
+        origin + Vec2::new(7.0, -2.5),
+        origin + Vec2::new(13.0, -2.5),
+        origin + Vec2::new(13.0, 5.0),
+        origin + Vec2::new(0.0, 5.0),
+        origin + Vec2::new(0.0, -5.0),
+    ];
+    painter.add(egui::Shape::line(points.to_vec(), Stroke::new(1.4, color)));
+}
+
+fn paint_git_branch_icon(painter: &egui::Painter, origin: egui::Pos2, color: Color32) {
+    let stroke = Stroke::new(1.25, color);
+    painter.circle_stroke(origin + Vec2::new(2.5, -4.5), 2.0, stroke);
+    painter.circle_stroke(origin + Vec2::new(10.5, -4.5), 2.0, stroke);
+    painter.circle_stroke(origin + Vec2::new(2.5, 5.0), 2.0, stroke);
+    painter.line_segment(
+        [origin + Vec2::new(2.5, -2.5), origin + Vec2::new(2.5, 3.0)],
+        stroke,
+    );
+    painter.add(egui::Shape::line(
+        vec![
+            origin + Vec2::new(10.5, -2.5),
+            origin + Vec2::new(10.5, 0.0),
+            origin + Vec2::new(5.0, 2.0),
+        ],
+        stroke,
+    ));
+}
+
+fn paint_github_mark(painter: &egui::Painter, origin: egui::Pos2, color: Color32) {
+    painter.circle_filled(origin + Vec2::new(5.5, 0.5), 5.0, color);
+    painter.add(egui::Shape::convex_polygon(
+        vec![
+            origin + Vec2::new(1.0, -2.0),
+            origin + Vec2::new(0.5, -6.0),
+            origin + Vec2::new(4.0, -4.2),
+            origin + Vec2::new(7.0, -4.2),
+            origin + Vec2::new(10.5, -6.0),
+            origin + Vec2::new(10.0, -2.0),
+        ],
+        color,
+        Stroke::NONE,
+    ));
+    painter.rect_filled(
+        egui::Rect::from_min_size(origin + Vec2::new(2.5, 3.0), Vec2::new(6.0, 4.0)),
+        1.5,
+        color,
+    );
+}
+
+fn paint_file_icon(painter: &egui::Painter, origin: egui::Pos2, color: Color32) {
+    let stroke = Stroke::new(1.25, color);
+    painter.add(egui::Shape::line(
+        vec![
+            origin + Vec2::new(1.0, -6.0),
+            origin + Vec2::new(7.0, -6.0),
+            origin + Vec2::new(11.0, -2.0),
+            origin + Vec2::new(11.0, 6.0),
+            origin + Vec2::new(1.0, 6.0),
+            origin + Vec2::new(1.0, -6.0),
+        ],
+        stroke,
+    ));
+    painter.line_segment(
+        [origin + Vec2::new(7.0, -6.0), origin + Vec2::new(7.0, -2.0)],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            origin + Vec2::new(7.0, -2.0),
+            origin + Vec2::new(11.0, -2.0),
+        ],
+        stroke,
+    );
 }
 
 fn terminal_layout_job(
@@ -2991,6 +3320,109 @@ fn compact_path(path: &Path) -> String {
     format!("…{tail}")
 }
 
+fn compact_header_path(path: &Path, max_chars: usize) -> String {
+    let mut text = path.display().to_string();
+    if let Some(profile) = std::env::var_os("USERPROFILE") {
+        let profile = PathBuf::from(profile).display().to_string();
+        if text
+            .get(..profile.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(&profile))
+        {
+            text.replace_range(..profile.len(), "~");
+        }
+    }
+    if text.chars().count() <= max_chars {
+        return text;
+    }
+    if max_chars <= 4 {
+        return text.chars().take(max_chars).collect();
+    }
+    let tail: String = text
+        .chars()
+        .rev()
+        .take(max_chars - 2)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    format!("…\\{tail}")
+}
+
+fn read_git_status(cwd: &Path) -> Option<GitStatus> {
+    let status = git_output(
+        cwd,
+        &[
+            "status",
+            "--porcelain=v1",
+            "--branch",
+            "--untracked-files=normal",
+        ],
+    )?;
+    let numstat = git_output(cwd, &["diff", "--numstat", "HEAD"]).unwrap_or_default();
+    let remote = git_output(cwd, &["remote", "get-url", "origin"]).unwrap_or_default();
+    let detached = git_output(cwd, &["rev-parse", "--short", "HEAD"]);
+    parse_git_status(&status, &numstat, &remote, detached.as_deref())
+}
+
+fn git_output(cwd: &Path, arguments: &[&str]) -> Option<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(arguments)
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+fn parse_git_status(
+    status: &str,
+    numstat: &str,
+    remote: &str,
+    detached_head: Option<&str>,
+) -> Option<GitStatus> {
+    let mut lines = status.lines();
+    let branch_line = lines.next()?.strip_prefix("## ")?;
+    let branch = if branch_line.starts_with("HEAD ") {
+        detached_head.unwrap_or("detached").trim().to_owned()
+    } else {
+        branch_line
+            .strip_prefix("No commits yet on ")
+            .unwrap_or(branch_line)
+            .split("...")
+            .next()
+            .unwrap_or(branch_line)
+            .split(" [")
+            .next()
+            .unwrap_or(branch_line)
+            .trim()
+            .to_owned()
+    };
+    let changed_files = lines.count();
+    let (additions, deletions) = numstat.lines().fold((0_usize, 0_usize), |totals, line| {
+        let mut fields = line.split('\t');
+        let added = fields
+            .next()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(0);
+        let removed = fields
+            .next()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(0);
+        (totals.0 + added, totals.1 + removed)
+    });
+    Some(GitStatus {
+        branch,
+        changed_files,
+        additions,
+        deletions,
+        github_remote: remote.to_ascii_lowercase().contains("github.com"),
+    })
+}
+
 fn compact_text(text: &str, max_chars: usize) -> String {
     if text.chars().count() <= max_chars {
         return text.to_owned();
@@ -3093,6 +3525,29 @@ mod tests {
     fn compact_text_preserves_short_names_and_truncates_long_ones() {
         assert_eq!(compact_text("workspace", 12), "workspace");
         assert_eq!(compact_text("a very long workspace", 12), "a very lo...");
+    }
+
+    #[test]
+    fn git_status_parses_branch_provider_and_worktree_totals() {
+        let status = "## feature/live-git...origin/feature/live-git\n M src/main.rs\nA  icon.svg";
+        let numstat = "97\t4\tsrc/main.rs\n12\t0\ticon.svg";
+        let git =
+            parse_git_status(status, numstat, "git@github.com:example/ade.git", None).unwrap();
+
+        assert_eq!(git.branch, "feature/live-git");
+        assert_eq!(git.changed_files, 2);
+        assert_eq!((git.additions, git.deletions), (109, 4));
+        assert!(git.github_remote);
+    }
+
+    #[test]
+    fn git_status_handles_clean_detached_head() {
+        let git = parse_git_status("## HEAD (no branch)", "", "", Some("a1b2c3d")).unwrap();
+
+        assert_eq!(git.branch, "a1b2c3d");
+        assert_eq!(git.changed_files, 0);
+        assert_eq!((git.additions, git.deletions), (0, 0));
+        assert!(!git.github_remote);
     }
 
     #[test]

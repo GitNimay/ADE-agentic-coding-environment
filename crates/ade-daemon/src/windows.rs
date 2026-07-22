@@ -45,33 +45,10 @@ if (Get-Module -ListAvailable -Name PSReadLine) {
     } catch {}
 }
 function global:prompt {
-    $lastExitCode = $global:LASTEXITCODE
     $location = (Get-Location).ProviderPath
     $uri = ([uri]$location).AbsoluteUri
     [Console]::Write("$global:__ade_escape]7;$uri$([char]7)")
-    [Console]::Write("$global:__ade_escape[8m__ADE_BLOCK_DIVIDER__$global:__ade_escape[0m`r`n")
-
-    $pathLabel = $location
-    $homePath = [Environment]::GetFolderPath('UserProfile')
-    if ($homePath -and $pathLabel.StartsWith($homePath, [StringComparison]::OrdinalIgnoreCase)) {
-        $pathLabel = '~' + $pathLabel.Substring($homePath.Length)
-    }
-    $header = "$global:__ade_escape[48;2;28;28;28m$global:__ade_escape[38;2;232;232;232m  $pathLabel  $global:__ade_escape[0m"
-
-    $branch = $null
-    if (Get-Command git -ErrorAction SilentlyContinue) {
-        $branch = git branch --show-current 2>$null
-    }
-    if ($branch) {
-        $changes = @(git status --porcelain 2>$null)
-        $added = @($changes | Where-Object { $_ -match '^\?\?|^[AMR]' }).Count
-        $removed = @($changes | Where-Object { $_ -match '^.D|^D' }).Count
-        $gitStatus = if ($changes.Count -eq 0) { 'clean' } else { "+$added  -$removed" }
-        $header += "  $global:__ade_escape[48;2;20;30;22m$global:__ade_escape[38;2;151;211;142m  git:$branch  $global:__ade_escape[0m"
-        $header += "  $global:__ade_escape[38;2;150;150;150m$gitStatus$global:__ade_escape[0m"
-    }
-    [Console]::Write("$header`r`n")
-    $global:LASTEXITCODE = $lastExitCode
+    [Console]::Write("$global:__ade_escape[8m__ADE_BLOCK_DIVIDER__$global:__ade_escape[0m`r`n`r`n")
     return "$global:__ade_escape[38;2;126;189;255m❯$global:__ade_escape[0m "
 }
 "#;
