@@ -64,7 +64,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
         viewport: egui::ViewportBuilder::default()
-            .with_title("")
+            .with_title("termy")
             .with_icon(app_icon)
             .with_inner_size([1280.0, 800.0])
             .with_min_inner_size([480.0, 360.0])
@@ -74,7 +74,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     eframe::run_native(
-        "ADE",
+        "termy",
         options,
         Box::new(|creation_context| Ok(Box::new(AdeApp::new(creation_context)))),
     )?;
@@ -268,11 +268,11 @@ impl AdeApp {
 
     fn send(&mut self, request: ClientRequest) {
         let Some(client) = &self.client else {
-            self.error_message = Some("The ADE background daemon is not connected".to_owned());
+            self.error_message = Some("The termy background daemon is not connected".to_owned());
             return;
         };
         if client.send(request).is_err() {
-            self.error_message = Some("The ADE background daemon disconnected".to_owned());
+            self.error_message = Some("The termy background daemon disconnected".to_owned());
         }
     }
 
@@ -1131,7 +1131,7 @@ impl eframe::App for AdeApp {
         }
 
         if let Some(message) = self.error_message.clone() {
-            egui::Window::new("ADE error")
+            egui::Window::new("termy error")
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
@@ -2335,7 +2335,7 @@ fn terminal_pane_ui(
             egui::pos2(rect.right(), footer_top),
         );
         ui.painter()
-            .rect_filled(dock_rect, 0.0, Color32::from_rgb(10, 10, 10));
+            .rect_filled(dock_rect, 0.0, terminal_background());
         if current_block_top.is_none() {
             ui.painter().hline(
                 dock_rect.x_range(),
@@ -2485,11 +2485,6 @@ fn paint_terminal_footer(ui: &mut egui::Ui, rect: egui::Rect, active: bool) {
     } else {
         Color32::from_rgb(105, 105, 105)
     };
-    let label_color = if active {
-        Color32::from_rgb(125, 125, 125)
-    } else {
-        Color32::from_rgb(76, 76, 76)
-    };
     let baseline = egui::pos2(rect.left() + TERMINAL_SIDE_PADDING, rect.center().y);
     ui.painter().text(
         baseline,
@@ -2497,13 +2492,6 @@ fn paint_terminal_footer(ui: &mut egui::Ui, rect: egui::Rect, active: bool) {
         "Ctrl+Shift+P",
         FontId::new(11.0, FontFamily::Monospace),
         key_color,
-    );
-    ui.painter().text(
-        baseline + Vec2::new(90.0, 0.0),
-        egui::Align2::LEFT_CENTER,
-        "Command palette",
-        FontId::proportional(12.0),
-        label_color,
     );
 }
 
@@ -2539,6 +2527,7 @@ fn paint_command_header(
     let max_path_chars = ((max_path_width - 34.0) / 7.5).max(4.0) as usize;
     let path_label = compact_header_path(cwd, max_path_chars);
     let font = FontId::new(12.0, FontFamily::Monospace);
+    let stats_font = FontId::new(16.0, FontFamily::Monospace);
     let path_text_width = ui.fonts_mut(|fonts| {
         fonts
             .layout_no_wrap(path_label.clone(), font.clone(), text_primary())
@@ -2635,7 +2624,7 @@ fn paint_command_header(
             fonts
                 .layout_no_wrap(
                     count_label.clone(),
-                    font.clone(),
+                    stats_font.clone(),
                     Color32::from_rgb(175, 175, 175),
                 )
                 .size()
@@ -2643,7 +2632,7 @@ fn paint_command_header(
             fonts
                 .layout_no_wrap(
                     addition_label.clone(),
-                    font.clone(),
+                    stats_font.clone(),
                     Color32::from_rgb(82, 196, 92),
                 )
                 .size()
@@ -2651,7 +2640,7 @@ fn paint_command_header(
             fonts
                 .layout_no_wrap(
                     deletion_label.clone(),
-                    font.clone(),
+                    stats_font.clone(),
                     Color32::from_rgb(238, 91, 91),
                 )
                 .size()
@@ -2672,7 +2661,7 @@ fn paint_command_header(
         egui::pos2(x, center_y),
         egui::Align2::LEFT_CENTER,
         count_label,
-        font.clone(),
+        stats_font.clone(),
         Color32::from_rgb(175, 175, 175),
     );
     x += count_width;
@@ -2683,7 +2672,7 @@ fn paint_command_header(
             egui::pos2(x, center_y),
             egui::Align2::LEFT_CENTER,
             addition_label,
-            font.clone(),
+            stats_font.clone(),
             Color32::from_rgb(82, 196, 92),
         );
         x += addition_width;
@@ -2696,7 +2685,7 @@ fn paint_command_header(
             egui::pos2(x, center_y),
             egui::Align2::LEFT_CENTER,
             deletion_label,
-            font,
+            stats_font,
             Color32::from_rgb(238, 91, 91),
         );
     }

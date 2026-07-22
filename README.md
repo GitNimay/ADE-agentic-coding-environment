@@ -1,4 +1,4 @@
-# ADE
+# termy
 
 A Windows-first terminal workspace manager built in Rust.
 

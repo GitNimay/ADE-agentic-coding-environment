@@ -54,12 +54,12 @@ try {
     if (-not $makeAppx) { throw "makeappx.exe was not found in the Windows SDK" }
 
     New-Item -ItemType Directory -Force $output | Out-Null
-    $package = Join-Path $output "ADE_0.1.0.0_x64.msix"
+    $package = Join-Path $output "termy_0.1.0.0_x64.msix"
     & $makeAppx.FullName pack /d $staging /p $package /o
     if ($LASTEXITCODE -ne 0) { throw "makeappx failed" }
 
     Write-Output "Created unsigned MSIX: $package"
-    Write-Output "Sign it with a certificate whose subject matches 'CN=ADE Development' before installation."
+    Write-Output "Sign it with a certificate whose subject matches 'CN=Termy Development' before installation."
 } finally {
     Pop-Location
 }
