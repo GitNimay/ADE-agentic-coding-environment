@@ -14,6 +14,11 @@ The split layout is a recursive binary tree. A right split creates a `columns` n
 split creates a `rows` node. Closing a pane collapses its parent into the remaining child. Ratios
 are validated before they can enter persisted state.
 
+Workspace terminal creation is capped at six by the daemon. Pane-count changes rebuild the binary
+tree into a managed grid: one full pane, two or three columns, then two balanced rows for four to
+six panes. The UI can resize persisted split ratios between pane-count changes, while the daemon
+remains the authority for the cap and canonical arrangement.
+
 ## Target Process Boundary
 
 Phase 1 uses two processes:

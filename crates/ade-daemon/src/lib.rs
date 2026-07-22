@@ -1,6 +1,9 @@
 use std::path::PathBuf;
 
-use ade_core::{LayoutError, LayoutNode, PaneId, SessionStatus, Workspace, WorkspaceId};
+use ade_core::{
+    LayoutError, LayoutNode, MAX_TERMINALS_PER_WORKSPACE, PaneId, SessionStatus, Workspace,
+    WorkspaceId, managed_terminal_layout,
+};
 use ade_protocol::{AppSnapshot, ClientRequest, PaneSnapshot, WorkspaceSnapshot};
 use ade_storage::{Repository, StorageError};
 use thiserror::Error;
@@ -19,6 +22,11 @@ pub enum DaemonError {
     WorkspaceNotFound(WorkspaceId),
     #[error("workspace {0} has no active pane")]
     WorkspaceHasNoActivePane(WorkspaceId),
+    #[error("workspace {workspace_id} is limited to {limit} terminals")]
+    TerminalLimitReached {
+        workspace_id: WorkspaceId,
+        limit: usize,
+    },
     #[error("pane {0} does not exist")]
     PaneNotFound(PaneId),
     #[error("layout mutation failed: {0}")]
@@ -242,7 +250,7 @@ impl DaemonState {
             ClientRequest::SplitPane {
                 workspace_id,
                 target,
-                direction,
+                direction: _,
             } => {
                 let target_pane = self.pane(target)?.clone();
                 if target_pane.workspace_id != workspace_id {
@@ -250,7 +258,15 @@ impl DaemonState {
                 }
                 let pane_id = PaneId::new();
                 let workspace = self.workspace_mut(workspace_id)?;
-                workspace.layout.split(target, pane_id, direction)?;
+                let mut panes = workspace.layout.pane_ids();
+                if panes.len() >= MAX_TERMINALS_PER_WORKSPACE {
+                    return Err(DaemonError::TerminalLimitReached {
+                        workspace_id,
+                        limit: MAX_TERMINALS_PER_WORKSPACE,
+                    });
+                }
+                panes.push(pane_id);
+                workspace.layout = managed_terminal_layout(&panes);
                 workspace.active_pane_id = Some(pane_id);
                 self.snapshot.panes.push(PaneSnapshot {
                     id: pane_id,
@@ -278,9 +294,11 @@ impl DaemonState {
                     workspace.layout = LayoutNode::Empty;
                     workspace.active_pane_id = None;
                 } else {
-                    workspace.layout.close(pane_id)?;
+                    let mut panes = workspace.layout.pane_ids();
+                    panes.retain(|candidate| *candidate != pane_id);
+                    workspace.layout = managed_terminal_layout(&panes);
                     if workspace.active_pane_id == Some(pane_id) {
-                        workspace.active_pane_id = workspace.layout.pane_ids().first().copied();
+                        workspace.active_pane_id = panes.first().copied();
                     }
                 }
                 self.snapshot.panes.retain(|pane| pane.id != pane_id);
@@ -630,6 +648,64 @@ mod tests {
         assert!(matches!(create.action, StateAction::SpawnPane(_)));
         assert_eq!(state.snapshot().panes.len(), 1);
         assert!(state.snapshot().workspaces[0].active_pane_id.is_some());
+    }
+
+    #[test]
+    fn workspace_reflows_panes_and_rejects_a_seventh_terminal() {
+        let mut state = DaemonState::new(AppSnapshot::default());
+        state
+            .handle(
+                ClientRequest::CreateWorkspace {
+                    name: "one".to_owned(),
+                    root: PathBuf::from(r"C:\work"),
+                },
+                "pwsh.exe",
+            )
+            .unwrap();
+        let workspace_id = state.snapshot().workspaces[0].id;
+
+        for _ in 1..MAX_TERMINALS_PER_WORKSPACE {
+            let target = state.snapshot().workspaces[0].active_pane_id.unwrap();
+            state
+                .handle(
+                    ClientRequest::SplitPane {
+                        workspace_id,
+                        target,
+                        direction: SplitDirection::Down,
+                    },
+                    "pwsh.exe",
+                )
+                .unwrap();
+        }
+
+        let workspace = &state.snapshot().workspaces[0];
+        assert_eq!(workspace.layout.pane_ids().len(), MAX_TERMINALS_PER_WORKSPACE);
+        assert!(matches!(
+            workspace.layout,
+            LayoutNode::Split {
+                axis: ade_core::SplitAxis::Rows,
+                ..
+            }
+        ));
+
+        let target = workspace.active_pane_id.unwrap();
+        let error = state
+            .handle(
+                ClientRequest::SplitPane {
+                    workspace_id,
+                    target,
+                    direction: SplitDirection::Right,
+                },
+                "pwsh.exe",
+            )
+            .unwrap_err();
+        assert!(matches!(error, DaemonError::TerminalLimitReached { .. }));
+        assert_eq!(state.snapshot().panes.len(), MAX_TERMINALS_PER_WORKSPACE);
+
+        state
+            .handle(ClientRequest::ClosePane { pane_id: target }, "pwsh.exe")
+            .unwrap();
+        assert_eq!(state.snapshot().workspaces[0].layout.pane_ids().len(), 5);
     }
 
     #[test]

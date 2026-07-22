@@ -11,7 +11,10 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use ade_core::{LayoutNode, PaneId, SessionStatus, SplitAxis, SplitDirection, Workspace};
+use ade_core::{
+    LayoutNode, MAX_TERMINALS_PER_WORKSPACE, PaneId, SessionStatus, SplitAxis, SplitDirection,
+    Workspace,
+};
 use ade_protocol::{
     AppSnapshot, ClientRequest, PROTOCOL_VERSION, PaneSnapshot, ServerEvent, Versioned,
     WorkspaceSnapshot, pipe_name, read_frame, write_frame,
@@ -275,6 +278,12 @@ impl AdeApp {
         let Some(workspace) = self.workspaces.get(self.active_workspace) else {
             return;
         };
+        if workspace.model.layout.pane_ids().len() >= MAX_TERMINALS_PER_WORKSPACE {
+            self.error_message = Some(format!(
+                "A workspace can contain up to {MAX_TERMINALS_PER_WORKSPACE} terminals. Close a terminal before opening another."
+            ));
+            return;
+        }
         let request = workspace.model.active_pane_id.map_or(
             ClientRequest::CreatePane {
                 workspace_id: workspace.model.id,
@@ -831,7 +840,7 @@ impl AdeApp {
         if backdrop.clicked() {
             self.palette_open = false;
         }
-        let final_width = (content_rect.width() - 32.0).clamp(320.0, 620.0);
+        let final_width = (content_rect.width() - 32.0).clamp(320.0, 440.0);
         let panel_width = egui::lerp(final_width * 0.965..=final_width, reveal);
         let panel_top = egui::lerp(58.0..=72.0, reveal);
         egui::Area::new(egui::Id::new("command-palette"))
@@ -844,15 +853,14 @@ impl AdeApp {
             .show(context, |ui| {
                 ui.set_width(panel_width);
                 egui::Frame::window(&context.style_of(egui::Theme::Dark))
-                    .fill(Color32::from_rgb(10, 10, 10))
+                    .fill(Color32::BLACK)
                     .corner_radius(12.0)
-                    .stroke(Stroke::new(1.0, Color32::from_rgb(51, 51, 51)))
+                    .stroke(Stroke::new(1.0, Color32::from_rgb(46, 46, 46)))
                     .inner_margin(egui::Margin::same(0))
                     .show(ui, |ui| {
                         ui.set_width(panel_width - 2.0);
                         egui::Frame::NONE
-                            .fill(Color32::from_rgb(14, 14, 14))
-                            .inner_margin(egui::Margin::symmetric(14, 12))
+                            .inner_margin(egui::Margin::symmetric(12, 10))
                             .show(ui, |ui| {
                                 ui.horizontal(|ui| {
                                     paint_palette_search_icon(ui);
@@ -860,7 +868,7 @@ impl AdeApp {
                                         egui::TextEdit::singleline(&mut self.palette_query)
                                             .hint_text("Type a command or search…")
                                             .desired_width(f32::INFINITY)
-                                            .font(FontId::proportional(15.0))
+                                            .font(FontId::proportional(14.0))
                                             .frame(egui::Frame::NONE),
                                     );
                                     response.request_focus();
@@ -876,9 +884,8 @@ impl AdeApp {
                             Stroke::new(1.0, border()),
                         );
 
-                        let max_list_height = (content_rect.height() - 250.0).clamp(156.0, 360.0);
                         egui::ScrollArea::vertical()
-                            .max_height(max_list_height)
+                            .max_height(196.0)
                             .auto_shrink([false, true])
                             .show(ui, |ui| {
                                 ui.add_space(6.0);
@@ -1287,8 +1294,8 @@ fn paint_palette_search_icon(ui: &mut egui::Ui) {
 
 fn palette_keycap(ui: &mut egui::Ui, label: &str) {
     egui::Frame::NONE
-        .fill(Color32::from_rgb(25, 25, 25))
-        .stroke(Stroke::new(1.0, Color32::from_rgb(53, 53, 53)))
+        .fill(Color32::from_rgb(26, 26, 26))
+        .stroke(Stroke::new(1.0, Color32::from_rgb(46, 46, 46)))
         .corner_radius(5.0)
         .inner_margin(egui::Margin::symmetric(7, 3))
         .show(ui, |ui| {
@@ -1301,7 +1308,7 @@ fn palette_keycap(ui: &mut egui::Ui, label: &str) {
 }
 
 fn palette_group_heading(ui: &mut egui::Ui, group: PaletteGroup) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 27.0), Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 24.0), Sense::hover());
     ui.painter().text(
         egui::pos2(rect.left() + 14.0, rect.center().y + 1.0),
         egui::Align2::LEFT_CENTER,
@@ -1314,22 +1321,22 @@ fn palette_group_heading(ui: &mut egui::Ui, group: PaletteGroup) {
 #[allow(clippy::cast_precision_loss)]
 fn palette_command_row(ui: &mut egui::Ui, entry: &PaletteEntry, selected: bool) -> egui::Response {
     let width = ui.available_width();
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 42.0), Sense::click());
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 40.0), Sense::click());
     let row_rect = rect.shrink2(Vec2::new(7.0, 1.0));
     if selected || response.hovered() {
         ui.painter().rect_filled(
             row_rect,
-            7.0,
+            6.0,
             if response.is_pointer_button_down_on() {
-                Color32::from_rgb(35, 35, 35)
+                Color32::from_rgb(31, 31, 31)
             } else {
-                Color32::from_rgb(27, 27, 27)
+                Color32::from_rgb(26, 26, 26)
             },
         );
         ui.painter().rect_stroke(
             row_rect,
-            7.0,
-            Stroke::new(1.0, Color32::from_rgb(47, 47, 47)),
+            6.0,
+            Stroke::new(1.0, Color32::from_rgb(46, 46, 46)),
             egui::StrokeKind::Inside,
         );
     }
@@ -1342,22 +1349,22 @@ fn palette_command_row(ui: &mut egui::Ui, entry: &PaletteEntry, selected: bool) 
         icon_rect,
         6.0,
         if selected {
-            Color32::from_rgb(42, 42, 42)
+            Color32::from_rgb(41, 41, 41)
         } else {
-            Color32::from_rgb(20, 20, 20)
+            Color32::from_rgb(26, 26, 26)
         },
     );
     ui.painter().rect_stroke(
         icon_rect,
         6.0,
-        Stroke::new(1.0, Color32::from_rgb(49, 49, 49)),
+        Stroke::new(1.0, Color32::from_rgb(46, 46, 46)),
         egui::StrokeKind::Inside,
     );
     ui.painter().text(
         icon_rect.center(),
         egui::Align2::CENTER_CENTER,
         entry.icon,
-        FontId::proportional(14.0),
+        FontId::proportional(13.0),
         if selected {
             text_primary()
         } else {
@@ -1368,7 +1375,7 @@ fn palette_command_row(ui: &mut egui::Ui, entry: &PaletteEntry, selected: bool) 
         egui::pos2(icon_rect.right() + 11.0, row_rect.center().y),
         egui::Align2::LEFT_CENTER,
         entry.label,
-        FontId::proportional(14.0),
+        FontId::proportional(13.0),
         text_primary(),
     );
 
@@ -1382,11 +1389,11 @@ fn palette_command_row(ui: &mut egui::Ui, entry: &PaletteEntry, selected: bool) 
             Vec2::new(key_width, 24.0),
         );
         ui.painter()
-            .rect_filled(key_rect, 5.0, Color32::from_rgb(19, 19, 19));
+            .rect_filled(key_rect, 5.0, Color32::from_rgb(26, 26, 26));
         ui.painter().rect_stroke(
             key_rect,
             5.0,
-            Stroke::new(1.0, Color32::from_rgb(49, 49, 49)),
+            Stroke::new(1.0, Color32::from_rgb(46, 46, 46)),
             egui::StrokeKind::Inside,
         );
         ui.painter().text(
@@ -1396,6 +1403,9 @@ fn palette_command_row(ui: &mut egui::Ui, entry: &PaletteEntry, selected: bool) 
             FontId::monospace(10.5),
             text_secondary(),
         );
+    }
+    if selected {
+        response.scroll_to_me(None);
     }
     response
 }
@@ -1419,7 +1429,7 @@ fn palette_empty_state(ui: &mut egui::Ui, query: &str) {
 }
 
 fn palette_footer(ui: &mut egui::Ui, result_count: usize) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 38.0), Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 34.0), Sense::hover());
     ui.painter()
         .hline(rect.x_range(), rect.top(), Stroke::new(1.0, border()));
     ui.painter().text(

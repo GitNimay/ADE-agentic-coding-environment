@@ -9,6 +9,8 @@ const DEFAULT_SPLIT_RATIO: f32 = 0.5;
 const MIN_SPLIT_RATIO: f32 = 0.1;
 const MAX_SPLIT_RATIO: f32 = 0.9;
 
+pub const MAX_TERMINALS_PER_WORKSPACE: usize = 6;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SplitAxis {
@@ -231,6 +233,40 @@ impl LayoutNode {
     }
 }
 
+/// Builds the managed workspace arrangement for up to six panes.
+///
+/// One to three panes use a single row. Four to six panes use two rows,
+/// with the larger row placed first when the count is odd.
+#[must_use]
+pub fn managed_terminal_layout(panes: &[PaneId]) -> LayoutNode {
+    match panes.len() {
+        0 => LayoutNode::Empty,
+        1..=3 => pane_row(panes),
+        _ => {
+            let first_row_len = panes.len().div_ceil(2).min(3);
+            LayoutNode::Split {
+                axis: SplitAxis::Rows,
+                ratio: DEFAULT_SPLIT_RATIO,
+                first: Box::new(pane_row(&panes[..first_row_len])),
+                second: Box::new(pane_row(&panes[first_row_len..])),
+            }
+        }
+    }
+}
+
+fn pane_row(panes: &[PaneId]) -> LayoutNode {
+    match panes {
+        [] => LayoutNode::Empty,
+        [pane_id] => LayoutNode::pane(*pane_id),
+        [first, rest @ ..] => LayoutNode::Split {
+            axis: SplitAxis::Columns,
+            ratio: 1.0 / panes.len() as f32,
+            first: Box::new(LayoutNode::pane(*first)),
+            second: Box::new(pane_row(rest)),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -292,5 +328,37 @@ mod tests {
 
         assert_eq!(restored, layout);
         restored.validate().unwrap();
+    }
+
+    #[test]
+    fn managed_terminal_layout_uses_expected_grid_for_each_supported_count() {
+        let panes: Vec<_> = (0..MAX_TERMINALS_PER_WORKSPACE)
+            .map(|_| PaneId::new())
+            .collect();
+
+        for count in 0..=MAX_TERMINALS_PER_WORKSPACE {
+            let layout = managed_terminal_layout(&panes[..count]);
+            assert_eq!(layout.pane_ids(), panes[..count]);
+            layout.validate().unwrap();
+
+            match count {
+                0 | 1 => assert!(!matches!(layout, LayoutNode::Split { .. })),
+                2 | 3 => assert!(matches!(
+                    layout,
+                    LayoutNode::Split {
+                        axis: SplitAxis::Columns,
+                        ..
+                    }
+                )),
+                4..=6 => assert!(matches!(
+                    layout,
+                    LayoutNode::Split {
+                        axis: SplitAxis::Rows,
+                        ..
+                    }
+                )),
+                _ => unreachable!(),
+            }
+        }
     }
 }

@@ -7,6 +7,10 @@ a workspace sidebar, GPU-rendered terminal panes, persistent split layouts, scro
 support, and keyboard-driven commands. A per-user background daemon keeps terminals alive while
 the window is closed and stores workspace state in SQLite.
 
+Each workspace supports up to six terminals. Layouts are managed by terminal count: two or three
+terminals form one row, four form a 2x2 grid, five use rows of three and two, and six use a 3x2
+grid. Dividers remain resizable and the layout compacts automatically when a terminal closes.
+
 ## Development
 
 Requirements:
