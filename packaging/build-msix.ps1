@@ -26,7 +26,7 @@ try {
         $bitmap = [System.Drawing.Bitmap]::new($Width, $Height, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
         $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
         try {
-            $graphics.Clear([System.Drawing.Color]::White)
+            $graphics.Clear([System.Drawing.Color]::Transparent)
             $graphics.CompositingQuality = [System.Drawing.Drawing2D.CompositingQuality]::HighQuality
             $graphics.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
             $graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::HighQuality

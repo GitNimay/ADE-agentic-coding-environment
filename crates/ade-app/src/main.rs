@@ -234,6 +234,7 @@ struct AdeApp {
     sidebar_open: bool,
     sidebar_hover_started: Option<Instant>,
     sidebar_left_at: Option<Instant>,
+    terminal_limit_popup: bool,
 }
 
 impl AdeApp {
@@ -254,6 +255,7 @@ impl AdeApp {
             sidebar_open: false,
             sidebar_hover_started: None,
             sidebar_left_at: None,
+            terminal_limit_popup: false,
         };
         app.send(ClientRequest::Attach);
         app
@@ -280,10 +282,8 @@ impl AdeApp {
         let Some(workspace) = self.workspaces.get(self.active_workspace) else {
             return;
         };
-        if workspace.model.layout.pane_ids().len() >= MAX_TERMINALS_PER_WORKSPACE {
-            self.error_message = Some(format!(
-                "A workspace can contain up to {MAX_TERMINALS_PER_WORKSPACE} terminals. Close a terminal before opening another."
-            ));
+        if terminal_limit_reached(workspace.model.layout.pane_ids().len()) {
+            self.terminal_limit_popup = true;
             return;
         }
         let request = workspace.model.active_pane_id.map_or(
@@ -952,6 +952,74 @@ impl AdeApp {
             PaletteCommand::PreviousWorkspace => self.focus_relative_workspace(false),
         }
     }
+
+    fn show_terminal_limit_popup(&mut self, context: &egui::Context) {
+        if !self.terminal_limit_popup {
+            return;
+        }
+        let modal_width = (context.content_rect().width() - 32.0).clamp(304.0, 400.0);
+        let modal_frame = egui::Frame::NONE
+            .fill(Color32::from_rgb(10, 10, 10))
+            .stroke(Stroke::new(1.0, border()))
+            .corner_radius(12.0)
+            .shadow(egui::epaint::Shadow {
+                offset: [0, 16],
+                blur: 40,
+                spread: 0,
+                color: Color32::from_black_alpha(210),
+            });
+        let response = egui::Modal::new(egui::Id::new("terminal-limit-popup"))
+            .backdrop_color(Color32::from_black_alpha(176))
+            .frame(modal_frame)
+            .show(context, |ui| {
+                ui.set_width(modal_width);
+                egui::Frame::NONE
+                    .inner_margin(egui::Margin {
+                        left: 24,
+                        right: 24,
+                        top: 22,
+                        bottom: 20,
+                    })
+                    .show(ui, |ui| {
+                        ui.label(
+                            RichText::new("Terminal Limit Reached")
+                                .font(FontId::proportional(16.0))
+                                .strong()
+                                .color(text_primary()),
+                        );
+                        ui.add_space(10.0);
+                        ui.label(
+                            RichText::new(format!(
+                                "This workspace is limited to {MAX_TERMINALS_PER_WORKSPACE} terminals. Close one before opening a new terminal."
+                            ))
+                            .font(FontId::proportional(14.0))
+                            .color(text_secondary()),
+                        );
+                    });
+
+                ui.painter().hline(
+                    ui.max_rect().x_range(),
+                    ui.min_rect().bottom(),
+                    Stroke::new(1.0, border()),
+                );
+                egui::Frame::NONE
+                    .inner_margin(egui::Margin::symmetric(16, 12))
+                    .show(ui, |ui| {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let done = modal_primary_button(ui, "Done");
+                            done.request_focus();
+                            if done.clicked()
+                                || ui.input(|input| input.key_pressed(Key::Enter))
+                            {
+                                ui.close();
+                            }
+                        });
+                    });
+            });
+        if response.should_close() {
+            self.terminal_limit_popup = false;
+        }
+    }
 }
 
 impl eframe::App for AdeApp {
@@ -1042,6 +1110,7 @@ impl eframe::App for AdeApp {
                     }
                 });
         }
+        self.show_terminal_limit_popup(&context);
         self.workspace_dialogs(&context);
         self.command_palette(&context);
         context.request_repaint_after(Duration::from_millis(33));
@@ -1795,6 +1864,35 @@ fn compact_icon_button(ui: &mut egui::Ui, icon: &str, label: &str) -> egui::Resp
         icon,
         FontId::proportional(16.0),
         text_primary(),
+    );
+    response
+}
+
+fn modal_primary_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(64.0, 32.0), Sense::click());
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
+    });
+    let fill = if response.is_pointer_button_down_on() {
+        Color32::from_rgb(210, 210, 210)
+    } else if response.hovered() || response.has_focus() {
+        Color32::from_rgb(245, 245, 245)
+    } else {
+        text_primary()
+    };
+    ui.painter().rect(
+        rect,
+        6.0,
+        fill,
+        Stroke::new(1.0, Color32::WHITE),
+        egui::StrokeKind::Inside,
+    );
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        label,
+        FontId::proportional(14.0),
+        Color32::BLACK,
     );
     response
 }
@@ -2651,6 +2749,10 @@ fn cells_for_pixels(pixels: f32, cell_size: f32) -> u16 {
     (pixels / cell_size).floor().clamp(2.0, f32::from(i16::MAX)) as u16
 }
 
+fn terminal_limit_reached(terminal_count: usize) -> bool {
+    terminal_count >= MAX_TERMINALS_PER_WORKSPACE
+}
+
 fn minimum_layout_extent(node: &LayoutNode, measured_axis: SplitAxis) -> f32 {
     match node {
         LayoutNode::Empty => 0.0,
@@ -2842,6 +2944,13 @@ mod tests {
         assert_eq!(cells_for_pixels(803.0, 8.0), 100);
         assert_eq!(cells_for_pixels(359.0, 18.0), 19);
         assert_eq!(cells_for_pixels(1.0, 18.0), 2);
+    }
+
+    #[test]
+    fn terminal_limit_popup_starts_at_six_terminals() {
+        assert!(!terminal_limit_reached(5));
+        assert!(terminal_limit_reached(6));
+        assert!(terminal_limit_reached(7));
     }
 
     #[test]
