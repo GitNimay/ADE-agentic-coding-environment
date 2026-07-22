@@ -41,6 +41,9 @@ pub enum ClientRequest {
     CloseWorkspace {
         workspace_id: WorkspaceId,
     },
+    CreatePane {
+        workspace_id: WorkspaceId,
+    },
     SplitPane {
         workspace_id: WorkspaceId,
         target: PaneId,
@@ -110,7 +113,7 @@ pub struct WorkspaceSnapshot {
     pub name: String,
     pub root: PathBuf,
     pub layout: LayoutNode,
-    pub active_pane_id: PaneId,
+    pub active_pane_id: Option<PaneId>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

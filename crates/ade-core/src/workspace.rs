@@ -19,7 +19,7 @@ pub struct Workspace {
     pub name: String,
     pub root_directory: PathBuf,
     pub layout: LayoutNode,
-    pub active_pane_id: PaneId,
+    pub active_pane_id: Option<PaneId>,
 }
 
 impl Workspace {
@@ -31,7 +31,7 @@ impl Workspace {
             name: name.into(),
             root_directory,
             layout: LayoutNode::pane(active_pane_id),
-            active_pane_id,
+            active_pane_id: Some(active_pane_id),
         }
     }
 }

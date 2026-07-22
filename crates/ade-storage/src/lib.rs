@@ -175,7 +175,7 @@ mod tests {
                 active_pane_id: workspace.active_pane_id,
             }],
             panes: vec![PaneSnapshot {
-                id: workspace.active_pane_id,
+                id: workspace.active_pane_id.unwrap(),
                 workspace_id: workspace.id,
                 status: SessionStatus::Running,
                 cwd: workspace.root_directory,

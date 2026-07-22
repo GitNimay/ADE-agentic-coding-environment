@@ -223,6 +223,7 @@ struct AdeApp {
     error_message: Option<String>,
     palette_open: bool,
     palette_query: String,
+    palette_selection: usize,
     client: Option<DaemonClient>,
     rename_workspace: Option<(ade_core::WorkspaceId, String)>,
     sidebar_open: bool,
@@ -242,6 +243,7 @@ impl AdeApp {
             error_message,
             palette_open: false,
             palette_query: String::new(),
+            palette_selection: 0,
             client: client.ok(),
             rename_workspace: None,
             sidebar_open: false,
@@ -273,11 +275,17 @@ impl AdeApp {
         let Some(workspace) = self.workspaces.get(self.active_workspace) else {
             return;
         };
-        self.send(ClientRequest::SplitPane {
-            workspace_id: workspace.model.id,
-            target: workspace.model.active_pane_id,
-            direction,
-        });
+        let request = workspace.model.active_pane_id.map_or(
+            ClientRequest::CreatePane {
+                workspace_id: workspace.model.id,
+            },
+            |target| ClientRequest::SplitPane {
+                workspace_id: workspace.model.id,
+                target,
+                direction,
+            },
+        );
+        self.send(request);
         context.request_repaint();
     }
 
@@ -285,9 +293,9 @@ impl AdeApp {
         let Some(workspace) = self.workspaces.get(self.active_workspace) else {
             return;
         };
-        self.send(ClientRequest::ClosePane {
-            pane_id: workspace.model.active_pane_id,
-        });
+        if let Some(pane_id) = workspace.model.active_pane_id {
+            self.send(ClientRequest::ClosePane { pane_id });
+        }
     }
 
     fn drain_daemon_events(&mut self, context: &egui::Context) {
@@ -377,9 +385,13 @@ impl AdeApp {
     }
 
     fn handle_shortcuts(&mut self, context: &egui::Context) {
-        if context.input_mut(|input| input.consume_shortcut(&shortcut(Key::P))) {
+        if context.input_mut(|input| {
+            input.consume_shortcut(&shortcut(Key::P))
+                || input.consume_shortcut(&KeyboardShortcut::new(Modifiers::CTRL, Key::K))
+        }) {
             self.palette_open = true;
             self.palette_query.clear();
+            self.palette_selection = 0;
         }
         if context.input_mut(|input| input.consume_shortcut(&shortcut(Key::N))) {
             self.request_new_workspace(context);
@@ -400,7 +412,8 @@ impl AdeApp {
         }
         if context.input_mut(|input| input.consume_shortcut(&shortcut(Key::C)))
             && let Some(workspace) = self.workspaces.get(self.active_workspace)
-            && let Some(pane) = workspace.panes.get(&workspace.model.active_pane_id)
+            && let Some(pane_id) = workspace.model.active_pane_id
+            && let Some(pane) = workspace.panes.get(&pane_id)
             && let Some(text) = pane.selected_text()
         {
             context.copy_text(text);
@@ -409,12 +422,13 @@ impl AdeApp {
             match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_text()) {
                 Ok(text) => {
                     if let Some(workspace) = self.workspaces.get(self.active_workspace) {
-                        let pane_id = workspace.model.active_pane_id;
-                        let data = workspace
-                            .panes
-                            .get(&pane_id)
-                            .map(|pane| pane.paste_bytes(&text));
-                        if let Some(data) = data {
+                        let paste = workspace.model.active_pane_id.and_then(|pane_id| {
+                            workspace
+                                .panes
+                                .get(&pane_id)
+                                .map(|pane| (pane_id, pane.paste_bytes(&text)))
+                        });
+                        if let Some((pane_id, data)) = paste {
                             self.send(ClientRequest::Input { pane_id, data });
                         }
                     }
@@ -489,9 +503,12 @@ impl AdeApp {
             return;
         };
         let panes = workspace.model.layout.pane_ids();
+        if panes.is_empty() {
+            return;
+        }
         let Some(index) = panes
             .iter()
-            .position(|pane| *pane == workspace.model.active_pane_id)
+            .position(|pane| Some(*pane) == workspace.model.active_pane_id)
         else {
             return;
         };
@@ -501,7 +518,7 @@ impl AdeApp {
             index.checked_sub(1).unwrap_or(panes.len() - 1)
         };
         let pane_id = panes[next];
-        workspace.model.active_pane_id = pane_id;
+        workspace.model.active_pane_id = Some(pane_id);
         self.send(ClientRequest::FocusPane { pane_id });
     }
 
@@ -759,98 +776,143 @@ impl AdeApp {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn command_palette(&mut self, context: &egui::Context) {
-        if !self.palette_open {
+        if self.palette_open
+            && context.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Escape))
+        {
+            self.palette_open = false;
+        }
+        let reveal = context.animate_bool_with_time_and_easing(
+            egui::Id::new("command-palette-reveal"),
+            self.palette_open,
+            0.2,
+            egui::emath::easing::cubic_out,
+        );
+        if !self.palette_open && reveal <= 0.001 {
             return;
         }
 
-        let commands = [
-            (
-                "New workspace",
-                PaletteCommand::NewWorkspace,
-                "Ctrl+Shift+N",
-            ),
-            (
-                "Split pane right",
-                PaletteCommand::SplitRight,
-                "Ctrl+Shift+D",
-            ),
-            ("Split pane down", PaletteCommand::SplitDown, "Ctrl+Shift+E"),
-            (
-                "Close active pane",
-                PaletteCommand::ClosePane,
-                "Ctrl+Shift+W",
-            ),
-            ("Rename workspace", PaletteCommand::RenameWorkspace, "F2"),
-            ("Close workspace", PaletteCommand::CloseWorkspace, ""),
-            (
-                "Next workspace",
-                PaletteCommand::NextWorkspace,
-                "Ctrl+PageDown",
-            ),
-            (
-                "Previous workspace",
-                PaletteCommand::PreviousWorkspace,
-                "Ctrl+PageUp",
-            ),
-        ];
+        let filtered: Vec<_> = PALETTE_COMMANDS
+            .iter()
+            .filter(|entry| palette_matches(entry.label, &self.palette_query))
+            .collect();
+        self.palette_selection = self.palette_selection.min(filtered.len().saturating_sub(1));
+
+        let move_up = context.input_mut(|input| input.consume_key(Modifiers::NONE, Key::ArrowUp));
+        let move_down =
+            context.input_mut(|input| input.consume_key(Modifiers::NONE, Key::ArrowDown));
+        if !filtered.is_empty() {
+            if move_up {
+                self.palette_selection = self
+                    .palette_selection
+                    .checked_sub(1)
+                    .unwrap_or(filtered.len() - 1);
+            } else if move_down {
+                self.palette_selection = (self.palette_selection + 1) % filtered.len();
+            }
+        }
+        let activate = context.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Enter));
         let mut chosen = None;
-        egui::Window::new("Command palette")
-            .id(egui::Id::new("command-palette"))
-            .title_bar(false)
-            .resizable(false)
-            .collapsible(false)
-            .fixed_size([
-                (context.content_rect().width() - 32.0).clamp(320.0, 520.0),
-                (context.content_rect().height() - 80.0).clamp(220.0, 320.0),
-            ])
-            .anchor(egui::Align2::CENTER_TOP, [0.0, 90.0])
-            .frame(
-                egui::Frame::window(&context.style_of(egui::Theme::Dark))
-                    .fill(surface_primary())
-                    .corner_radius(12.0)
-                    .stroke(Stroke::new(1.0, border())),
-            )
+        let content_rect = context.content_rect();
+        let backdrop = egui::Area::new(egui::Id::new("command-palette-backdrop"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(content_rect.min)
             .show(context, |ui| {
-                let response = ui.add(
-                    egui::TextEdit::singleline(&mut self.palette_query)
-                        .hint_text("Type a command")
-                        .desired_width(f32::INFINITY)
-                        .font(FontId::proportional(15.0)),
+                let (rect, response) = ui.allocate_exact_size(content_rect.size(), Sense::click());
+                ui.painter().rect_filled(
+                    rect,
+                    0.0,
+                    Color32::from_black_alpha(150).gamma_multiply(reveal),
                 );
-                response.request_focus();
-                ui.add_space(8.0);
-                let query = self.palette_query.to_ascii_lowercase();
-                for (name, command, keys) in commands {
-                    if !query.is_empty() && !name.to_ascii_lowercase().contains(&query) {
-                        continue;
-                    }
-                    let response = ui
-                        .allocate_ui_with_layout(
-                            Vec2::new(ui.available_width(), 36.0),
-                            egui::Layout::left_to_right(egui::Align::Center),
-                            |ui| {
-                                let clicked = ui
-                                    .selectable_label(false, RichText::new(name).size(14.0))
-                                    .clicked();
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        ui.label(RichText::new(keys).size(12.0).color(muted()));
-                                    },
-                                );
-                                clicked
-                            },
-                        )
-                        .inner;
-                    if response {
-                        chosen = Some(command);
-                    }
-                }
+                response
+            })
+            .inner;
+        if backdrop.clicked() {
+            self.palette_open = false;
+        }
+        let final_width = (content_rect.width() - 32.0).clamp(320.0, 620.0);
+        let panel_width = egui::lerp(final_width * 0.965..=final_width, reveal);
+        let panel_top = egui::lerp(58.0..=72.0, reveal);
+        egui::Area::new(egui::Id::new("command-palette"))
+            .order(egui::Order::Foreground)
+            .pivot(egui::Align2::CENTER_TOP)
+            .fixed_pos(egui::pos2(
+                content_rect.center().x,
+                content_rect.top() + panel_top,
+            ))
+            .show(context, |ui| {
+                ui.set_width(panel_width);
+                egui::Frame::window(&context.style_of(egui::Theme::Dark))
+                    .fill(Color32::from_rgb(10, 10, 10))
+                    .corner_radius(12.0)
+                    .stroke(Stroke::new(1.0, Color32::from_rgb(51, 51, 51)))
+                    .inner_margin(egui::Margin::same(0))
+                    .show(ui, |ui| {
+                        ui.set_width(panel_width - 2.0);
+                        egui::Frame::NONE
+                            .fill(Color32::from_rgb(14, 14, 14))
+                            .inner_margin(egui::Margin::symmetric(14, 12))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    paint_palette_search_icon(ui);
+                                    let response = ui.add(
+                                        egui::TextEdit::singleline(&mut self.palette_query)
+                                            .hint_text("Type a command or search…")
+                                            .desired_width(f32::INFINITY)
+                                            .font(FontId::proportional(15.0))
+                                            .frame(egui::Frame::NONE),
+                                    );
+                                    response.request_focus();
+                                    if response.changed() {
+                                        self.palette_selection = 0;
+                                    }
+                                    palette_keycap(ui, "Esc");
+                                });
+                            });
+                        ui.painter().hline(
+                            ui.max_rect().x_range(),
+                            ui.min_rect().bottom(),
+                            Stroke::new(1.0, border()),
+                        );
+
+                        let max_list_height = (content_rect.height() - 250.0).clamp(156.0, 360.0);
+                        egui::ScrollArea::vertical()
+                            .max_height(max_list_height)
+                            .auto_shrink([false, true])
+                            .show(ui, |ui| {
+                                ui.add_space(6.0);
+                                if filtered.is_empty() {
+                                    palette_empty_state(ui, &self.palette_query);
+                                } else {
+                                    let mut previous_group = None;
+                                    for (index, entry) in filtered.iter().enumerate() {
+                                        if previous_group != Some(entry.group) {
+                                            palette_group_heading(ui, entry.group);
+                                            previous_group = Some(entry.group);
+                                        }
+                                        let response = palette_command_row(
+                                            ui,
+                                            entry,
+                                            index == self.palette_selection,
+                                        );
+                                        if response.hovered() {
+                                            self.palette_selection = index;
+                                        }
+                                        if response.clicked() {
+                                            chosen = Some(entry.command);
+                                        }
+                                    }
+                                }
+                                ui.add_space(6.0);
+                            });
+
+                        palette_footer(ui, filtered.len());
+                    });
             });
 
-        if context.input(|input| input.key_pressed(Key::Escape)) {
-            self.palette_open = false;
+        if activate && !filtered.is_empty() {
+            chosen = Some(filtered[self.palette_selection].command);
         }
         if let Some(command) = chosen {
             self.palette_open = false;
@@ -900,6 +962,7 @@ impl eframe::App for AdeApp {
         let requests = self.client.as_ref().map(|client| client.requests.clone());
         let terminal_input_enabled = !self.palette_open && self.rename_workspace.is_none();
         let mut updated_layout = None;
+        let mut create_terminal = None;
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(terminal_background()))
             .show(ui, |ui| {
@@ -907,21 +970,50 @@ impl eframe::App for AdeApp {
                 if let Some(workspace) = self.workspaces.get_mut(self.active_workspace)
                     && let Some(requests) = &requests
                 {
-                    let changed = render_layout(
-                        ui,
-                        rect,
-                        &mut workspace.model.layout,
-                        &mut workspace.panes,
-                        &mut workspace.model.active_pane_id,
-                        requests,
-                        terminal_input_enabled,
-                        "root",
-                    );
-                    if changed {
-                        updated_layout = Some((workspace.model.id, workspace.model.layout.clone()));
+                    if matches!(workspace.model.layout, LayoutNode::Empty) {
+                        let response = ui.interact(
+                            rect,
+                            egui::Id::new(("empty-workspace", workspace.model.id)),
+                            Sense::click(),
+                        );
+                        ui.painter().text(
+                            rect.center() - Vec2::new(0.0, 10.0),
+                            egui::Align2::CENTER_CENTER,
+                            "No terminals",
+                            FontId::proportional(18.0),
+                            text_primary(),
+                        );
+                        ui.painter().text(
+                            rect.center() + Vec2::new(0.0, 16.0),
+                            egui::Align2::CENTER_CENTER,
+                            "Click to open a terminal",
+                            FontId::proportional(13.0),
+                            text_secondary(),
+                        );
+                        if response.clicked() {
+                            create_terminal = Some(workspace.model.id);
+                        }
+                    } else {
+                        let changed = render_layout(
+                            ui,
+                            rect,
+                            &mut workspace.model.layout,
+                            &mut workspace.panes,
+                            &mut workspace.model.active_pane_id,
+                            requests,
+                            terminal_input_enabled,
+                            "root",
+                        );
+                        if changed {
+                            updated_layout =
+                                Some((workspace.model.id, workspace.model.layout.clone()));
+                        }
                     }
                 }
             });
+        if let Some(workspace_id) = create_terminal {
+            self.send(ClientRequest::CreatePane { workspace_id });
+        }
         if let Some((workspace_id, layout)) = updated_layout {
             self.send(ClientRequest::UpdateLayout {
                 workspace_id,
@@ -1090,6 +1182,260 @@ enum PaletteCommand {
     CloseWorkspace,
     NextWorkspace,
     PreviousWorkspace,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum PaletteGroup {
+    Actions,
+    Navigation,
+}
+
+impl PaletteGroup {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Actions => "Actions",
+            Self::Navigation => "Navigation",
+        }
+    }
+}
+
+struct PaletteEntry {
+    label: &'static str,
+    command: PaletteCommand,
+    shortcut: &'static str,
+    icon: &'static str,
+    group: PaletteGroup,
+}
+
+const PALETTE_COMMANDS: [PaletteEntry; 8] = [
+    PaletteEntry {
+        label: "New Workspace",
+        command: PaletteCommand::NewWorkspace,
+        shortcut: "Ctrl Shift N",
+        icon: "+",
+        group: PaletteGroup::Actions,
+    },
+    PaletteEntry {
+        label: "Split Pane Right",
+        command: PaletteCommand::SplitRight,
+        shortcut: "Ctrl Shift D",
+        icon: "→",
+        group: PaletteGroup::Actions,
+    },
+    PaletteEntry {
+        label: "Split Pane Down",
+        command: PaletteCommand::SplitDown,
+        shortcut: "Ctrl Shift E",
+        icon: "↓",
+        group: PaletteGroup::Actions,
+    },
+    PaletteEntry {
+        label: "Close Active Pane",
+        command: PaletteCommand::ClosePane,
+        shortcut: "Ctrl Shift W",
+        icon: "×",
+        group: PaletteGroup::Actions,
+    },
+    PaletteEntry {
+        label: "Rename Workspace…",
+        command: PaletteCommand::RenameWorkspace,
+        shortcut: "F2",
+        icon: "A",
+        group: PaletteGroup::Actions,
+    },
+    PaletteEntry {
+        label: "Close Workspace",
+        command: PaletteCommand::CloseWorkspace,
+        shortcut: "",
+        icon: "−",
+        group: PaletteGroup::Actions,
+    },
+    PaletteEntry {
+        label: "Next Workspace",
+        command: PaletteCommand::NextWorkspace,
+        shortcut: "Ctrl PgDn",
+        icon: "›",
+        group: PaletteGroup::Navigation,
+    },
+    PaletteEntry {
+        label: "Previous Workspace",
+        command: PaletteCommand::PreviousWorkspace,
+        shortcut: "Ctrl PgUp",
+        icon: "‹",
+        group: PaletteGroup::Navigation,
+    },
+];
+
+fn palette_matches(label: &str, query: &str) -> bool {
+    let query = query.trim();
+    query.is_empty()
+        || label
+            .to_ascii_lowercase()
+            .contains(&query.to_ascii_lowercase())
+}
+
+fn paint_palette_search_icon(ui: &mut egui::Ui) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(20.0), Sense::hover());
+    let center = rect.center() - Vec2::new(1.0, 1.0);
+    let stroke = Stroke::new(1.4, text_secondary());
+    ui.painter().circle_stroke(center, 5.0, stroke);
+    ui.painter().line_segment(
+        [center + Vec2::new(3.7, 3.7), center + Vec2::new(7.0, 7.0)],
+        stroke,
+    );
+}
+
+fn palette_keycap(ui: &mut egui::Ui, label: &str) {
+    egui::Frame::NONE
+        .fill(Color32::from_rgb(25, 25, 25))
+        .stroke(Stroke::new(1.0, Color32::from_rgb(53, 53, 53)))
+        .corner_radius(5.0)
+        .inner_margin(egui::Margin::symmetric(7, 3))
+        .show(ui, |ui| {
+            ui.label(
+                RichText::new(label)
+                    .font(FontId::monospace(10.5))
+                    .color(text_secondary()),
+            );
+        });
+}
+
+fn palette_group_heading(ui: &mut egui::Ui, group: PaletteGroup) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 27.0), Sense::hover());
+    ui.painter().text(
+        egui::pos2(rect.left() + 14.0, rect.center().y + 1.0),
+        egui::Align2::LEFT_CENTER,
+        group.label(),
+        FontId::proportional(11.0),
+        text_disabled(),
+    );
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn palette_command_row(ui: &mut egui::Ui, entry: &PaletteEntry, selected: bool) -> egui::Response {
+    let width = ui.available_width();
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 42.0), Sense::click());
+    let row_rect = rect.shrink2(Vec2::new(7.0, 1.0));
+    if selected || response.hovered() {
+        ui.painter().rect_filled(
+            row_rect,
+            7.0,
+            if response.is_pointer_button_down_on() {
+                Color32::from_rgb(35, 35, 35)
+            } else {
+                Color32::from_rgb(27, 27, 27)
+            },
+        );
+        ui.painter().rect_stroke(
+            row_rect,
+            7.0,
+            Stroke::new(1.0, Color32::from_rgb(47, 47, 47)),
+            egui::StrokeKind::Inside,
+        );
+    }
+
+    let icon_rect = egui::Rect::from_center_size(
+        egui::pos2(row_rect.left() + 21.0, row_rect.center().y),
+        Vec2::splat(26.0),
+    );
+    ui.painter().rect_filled(
+        icon_rect,
+        6.0,
+        if selected {
+            Color32::from_rgb(42, 42, 42)
+        } else {
+            Color32::from_rgb(20, 20, 20)
+        },
+    );
+    ui.painter().rect_stroke(
+        icon_rect,
+        6.0,
+        Stroke::new(1.0, Color32::from_rgb(49, 49, 49)),
+        egui::StrokeKind::Inside,
+    );
+    ui.painter().text(
+        icon_rect.center(),
+        egui::Align2::CENTER_CENTER,
+        entry.icon,
+        FontId::proportional(14.0),
+        if selected {
+            text_primary()
+        } else {
+            text_secondary()
+        },
+    );
+    ui.painter().text(
+        egui::pos2(icon_rect.right() + 11.0, row_rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        entry.label,
+        FontId::proportional(14.0),
+        text_primary(),
+    );
+
+    if !entry.shortcut.is_empty() {
+        let key_width = entry.shortcut.chars().count() as f32 * 6.4 + 14.0;
+        let key_rect = egui::Rect::from_center_size(
+            egui::pos2(
+                row_rect.right() - key_width * 0.5 - 9.0,
+                row_rect.center().y,
+            ),
+            Vec2::new(key_width, 24.0),
+        );
+        ui.painter()
+            .rect_filled(key_rect, 5.0, Color32::from_rgb(19, 19, 19));
+        ui.painter().rect_stroke(
+            key_rect,
+            5.0,
+            Stroke::new(1.0, Color32::from_rgb(49, 49, 49)),
+            egui::StrokeKind::Inside,
+        );
+        ui.painter().text(
+            key_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            entry.shortcut,
+            FontId::monospace(10.5),
+            text_secondary(),
+        );
+    }
+    response
+}
+
+fn palette_empty_state(ui: &mut egui::Ui, query: &str) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 116.0), Sense::hover());
+    ui.painter().text(
+        rect.center() - Vec2::new(0.0, 10.0),
+        egui::Align2::CENTER_CENTER,
+        "No commands found",
+        FontId::proportional(14.0),
+        text_primary(),
+    );
+    ui.painter().text(
+        rect.center() + Vec2::new(0.0, 13.0),
+        egui::Align2::CENTER_CENTER,
+        format!("Try a different search than “{}”", query.trim()),
+        FontId::proportional(12.0),
+        text_secondary(),
+    );
+}
+
+fn palette_footer(ui: &mut egui::Ui, result_count: usize) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 38.0), Sense::hover());
+    ui.painter()
+        .hline(rect.x_range(), rect.top(), Stroke::new(1.0, border()));
+    ui.painter().text(
+        egui::pos2(rect.left() + 14.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        format!("{result_count} commands"),
+        FontId::proportional(11.0),
+        text_disabled(),
+    );
+    ui.painter().text(
+        egui::pos2(rect.right() - 14.0, rect.center().y),
+        egui::Align2::RIGHT_CENTER,
+        "↑↓  Navigate    ↵  Select    Esc  Close",
+        FontId::monospace(10.5),
+        text_secondary(),
+    );
 }
 
 enum WorkspaceAction {
@@ -1531,19 +1877,20 @@ fn render_layout(
     rect: egui::Rect,
     node: &mut LayoutNode,
     panes: &mut HashMap<PaneId, TerminalPane>,
-    active_pane: &mut PaneId,
+    active_pane: &mut Option<PaneId>,
     requests: &Sender<ClientRequest>,
     accept_input: bool,
     path: &str,
 ) -> bool {
     match node {
+        LayoutNode::Empty => false,
         LayoutNode::Pane { pane_id } => {
             if let Some(pane) = panes.get_mut(pane_id) {
                 terminal_pane_ui(
                     ui,
                     rect,
                     pane,
-                    *pane_id == *active_pane,
+                    Some(*pane_id) == *active_pane,
                     active_pane,
                     requests,
                     accept_input,
@@ -1676,7 +2023,7 @@ fn terminal_pane_ui(
     rect: egui::Rect,
     pane: &mut TerminalPane,
     active: bool,
-    active_pane: &mut PaneId,
+    active_pane: &mut Option<PaneId>,
     requests: &Sender<ClientRequest>,
     accept_input: bool,
 ) {
@@ -1733,7 +2080,7 @@ fn terminal_pane_ui(
         ui.painter().hline(
             dock_rect.x_range(),
             dock_rect.top(),
-            Stroke::new(1.0 / pixels_per_point, border()),
+            Stroke::new(1.0, terminal_divider_color()),
         );
         if active {
             ui.painter().rect_filled(
@@ -1752,7 +2099,7 @@ fn terminal_pane_ui(
     ui.painter()
         .with_clip_rect(content_rect)
         .galley(grid_origin, galley, Color32::WHITE);
-    let divider_stroke = Stroke::new(1.0 / pixels_per_point, border());
+    let divider_stroke = Stroke::new(1.0, terminal_divider_color());
     let divider_painter = ui.painter().with_clip_rect(rect);
     for row in terminal_divider_rows(screen) {
         let y = snap_to_pixel(
@@ -1770,7 +2117,7 @@ fn terminal_pane_ui(
         Sense::click_and_drag(),
     );
     if response.clicked() || response.drag_started() {
-        *active_pane = pane.id;
+        *active_pane = Some(pane.id);
         let _ = requests.send(ClientRequest::FocusPane { pane_id: pane.id });
         response.request_focus();
     }
@@ -2193,10 +2540,6 @@ fn terminal_background() -> Color32 {
     Color32::BLACK
 }
 
-fn muted() -> Color32 {
-    text_secondary()
-}
-
 fn surface_primary() -> Color32 {
     Color32::BLACK
 }
@@ -2227,6 +2570,10 @@ fn border() -> Color32 {
 
 fn border_hover() -> Color32 {
     Color32::from_rgb(69, 69, 69)
+}
+
+fn terminal_divider_color() -> Color32 {
+    Color32::from_rgb(64, 64, 64)
 }
 
 fn danger() -> Color32 {
@@ -2405,6 +2752,14 @@ mod tests {
     fn compact_text_preserves_short_names_and_truncates_long_ones() {
         assert_eq!(compact_text("workspace", 12), "workspace");
         assert_eq!(compact_text("a very long workspace", 12), "a very lo...");
+    }
+
+    #[test]
+    fn command_palette_search_is_case_insensitive_and_trimmed() {
+        assert!(palette_matches("New Workspace", " workspace "));
+        assert!(palette_matches("Split Pane Right", "SPLIT"));
+        assert!(!palette_matches("Close Workspace", "rename"));
+        assert!(palette_matches("Close Workspace", ""));
     }
 
     #[test]

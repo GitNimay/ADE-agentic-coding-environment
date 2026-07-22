@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use ade_core::{LayoutError, PaneId, SessionStatus, Workspace, WorkspaceId};
+use ade_core::{LayoutError, LayoutNode, PaneId, SessionStatus, Workspace, WorkspaceId};
 use ade_protocol::{AppSnapshot, ClientRequest, PaneSnapshot, WorkspaceSnapshot};
 use ade_storage::{Repository, StorageError};
 use thiserror::Error;
@@ -17,6 +17,8 @@ pub enum DaemonError {
     Storage(#[from] StorageError),
     #[error("workspace {0} does not exist")]
     WorkspaceNotFound(WorkspaceId),
+    #[error("workspace {0} has no active pane")]
+    WorkspaceHasNoActivePane(WorkspaceId),
     #[error("pane {0} does not exist")]
     PaneNotFound(PaneId),
     #[error("layout mutation failed: {0}")]
@@ -175,7 +177,9 @@ impl DaemonState {
             ClientRequest::CreateWorkspace { name, root } => {
                 validate_name(&name)?;
                 let workspace = Workspace::new(name, root.clone());
-                let pane_id = workspace.active_pane_id;
+                let pane_id = workspace
+                    .active_pane_id
+                    .ok_or(DaemonError::WorkspaceHasNoActivePane(workspace.id))?;
                 self.snapshot.panes.push(PaneSnapshot {
                     id: pane_id,
                     workspace_id: workspace.id,
@@ -215,6 +219,26 @@ impl DaemonState {
                 }
                 Ok(StateChange::mutation(StateAction::ClosePanes(panes)))
             }
+            ClientRequest::CreatePane { workspace_id } => {
+                let workspace = self.workspace_mut(workspace_id)?;
+                if workspace.active_pane_id.is_some() {
+                    return Ok(StateChange::runtime(StateAction::None));
+                }
+                let pane_id = PaneId::new();
+                workspace.layout = LayoutNode::pane(pane_id);
+                workspace.active_pane_id = Some(pane_id);
+                let root = workspace.root.clone();
+                self.snapshot.panes.push(PaneSnapshot {
+                    id: pane_id,
+                    workspace_id,
+                    status: SessionStatus::Starting,
+                    cwd: root,
+                    process_label: process_label.to_owned(),
+                    cols: DEFAULT_COLUMNS,
+                    rows: DEFAULT_ROWS,
+                });
+                Ok(StateChange::mutation(StateAction::SpawnPane(pane_id)))
+            }
             ClientRequest::SplitPane {
                 workspace_id,
                 target,
@@ -227,7 +251,7 @@ impl DaemonState {
                 let pane_id = PaneId::new();
                 let workspace = self.workspace_mut(workspace_id)?;
                 workspace.layout.split(target, pane_id, direction)?;
-                workspace.active_pane_id = pane_id;
+                workspace.active_pane_id = Some(pane_id);
                 self.snapshot.panes.push(PaneSnapshot {
                     id: pane_id,
                     workspace_id,
@@ -240,11 +264,24 @@ impl DaemonState {
                 Ok(StateChange::mutation(StateAction::SpawnPane(pane_id)))
             }
             ClientRequest::ClosePane { pane_id } => {
-                let workspace_id = self.pane(pane_id)?.workspace_id;
+                let Some(workspace_id) = self
+                    .snapshot
+                    .panes
+                    .iter()
+                    .find(|pane| pane.id == pane_id)
+                    .map(|pane| pane.workspace_id)
+                else {
+                    return Ok(StateChange::runtime(StateAction::None));
+                };
                 let workspace = self.workspace_mut(workspace_id)?;
-                workspace.layout.close(pane_id)?;
-                if workspace.active_pane_id == pane_id {
-                    workspace.active_pane_id = workspace.layout.pane_ids()[0];
+                if workspace.layout.pane_ids().len() == 1 {
+                    workspace.layout = LayoutNode::Empty;
+                    workspace.active_pane_id = None;
+                } else {
+                    workspace.layout.close(pane_id)?;
+                    if workspace.active_pane_id == Some(pane_id) {
+                        workspace.active_pane_id = workspace.layout.pane_ids().first().copied();
+                    }
                 }
                 self.snapshot.panes.retain(|pane| pane.id != pane_id);
                 Ok(StateChange::mutation(StateAction::ClosePane(pane_id)))
@@ -256,7 +293,7 @@ impl DaemonState {
             }
             ClientRequest::FocusPane { pane_id } => {
                 let workspace_id = self.pane(pane_id)?.workspace_id;
-                self.workspace_mut(workspace_id)?.active_pane_id = pane_id;
+                self.workspace_mut(workspace_id)?.active_pane_id = Some(pane_id);
                 self.snapshot.active_workspace_id = Some(workspace_id);
                 Ok(StateChange::mutation(StateAction::None))
             }
@@ -276,15 +313,21 @@ impl DaemonState {
                             .into_iter()
                             .find(|pane| !received.contains(pane))
                             .or_else(|| received.first().copied())
-                            .unwrap_or(workspace.active_pane_id),
+                            .or(workspace.active_pane_id)
+                            .unwrap_or_else(PaneId::new),
                     )));
                 }
                 workspace.layout = layout;
                 Ok(StateChange::mutation(StateAction::None))
             }
             ClientRequest::Input { pane_id, data } => {
-                self.pane(pane_id)?;
-                Ok(StateChange::runtime(StateAction::Input { pane_id, data }))
+                let pane = self.pane(pane_id)?;
+                let action = if pane_has_live_session(&pane.status) {
+                    StateAction::Input { pane_id, data }
+                } else {
+                    StateAction::None
+                };
+                Ok(StateChange::runtime(action))
             }
             ClientRequest::Resize {
                 pane_id,
@@ -302,11 +345,16 @@ impl DaemonState {
                     .ok_or(DaemonError::PaneNotFound(pane_id))?;
                 pane.cols = cols;
                 pane.rows = rows;
-                Ok(StateChange::mutation(StateAction::Resize {
-                    pane_id,
-                    cols,
-                    rows,
-                }))
+                let action = if pane_has_live_session(&pane.status) {
+                    StateAction::Resize {
+                        pane_id,
+                        cols,
+                        rows,
+                    }
+                } else {
+                    StateAction::None
+                };
+                Ok(StateChange::mutation(action))
             }
             ClientRequest::ReportCwd { pane_id, cwd } => {
                 self.set_pane_cwd(pane_id, cwd)?;
@@ -354,6 +402,10 @@ fn validate_name(name: &str) -> Result<(), DaemonError> {
     }
 }
 
+fn pane_has_live_session(status: &SessionStatus) -> bool {
+    matches!(status, SessionStatus::Starting | SessionStatus::Running)
+}
+
 /// Runs the persistent per-user daemon until a client requests shutdown.
 ///
 /// # Errors
@@ -398,7 +450,7 @@ mod tests {
             .unwrap();
         assert!(change.persist);
         let workspace = state.snapshot().workspaces[0].clone();
-        let first = workspace.active_pane_id;
+        let first = workspace.active_pane_id.unwrap();
 
         state
             .handle(
@@ -411,21 +463,22 @@ mod tests {
             )
             .unwrap();
         assert_eq!(state.snapshot().panes.len(), 2);
-        let second = state.snapshot().workspaces[0].active_pane_id;
+        let second = state.snapshot().workspaces[0].active_pane_id.unwrap();
 
         state
             .handle(ClientRequest::ClosePane { pane_id: second }, "pwsh.exe")
             .unwrap();
         assert_eq!(state.snapshot().panes.len(), 1);
-        assert_eq!(state.snapshot().workspaces[0].active_pane_id, first);
+        assert_eq!(state.snapshot().workspaces[0].active_pane_id, Some(first));
     }
 
     #[test]
     fn persisted_running_panes_restart_as_starting() {
         let mut snapshot = AppSnapshot::default();
         let workspace = Workspace::new("one", PathBuf::from(r"C:\work"));
+        let pane_id = workspace.active_pane_id.unwrap();
         snapshot.panes.push(PaneSnapshot {
-            id: workspace.active_pane_id,
+            id: pane_id,
             workspace_id: workspace.id,
             status: SessionStatus::Running,
             cwd: workspace.root_directory.clone(),
@@ -455,7 +508,7 @@ mod tests {
             .handle(
                 ClientRequest::SplitPane {
                     workspace_id: workspace.id,
-                    target: workspace.active_pane_id,
+                    target: workspace.active_pane_id.unwrap(),
                     direction: SplitDirection::Right,
                 },
                 "pwsh.exe",
@@ -484,7 +537,7 @@ mod tests {
         state
             .handle(
                 ClientRequest::ReportCwd {
-                    pane_id: workspace.active_pane_id,
+                    pane_id: workspace.active_pane_id.unwrap(),
                     cwd: PathBuf::from(r"C:\work\nested"),
                 },
                 "pwsh.exe",
@@ -536,5 +589,100 @@ mod tests {
             state.snapshot().active_workspace_id,
             Some(state.snapshot().workspaces[0].id)
         );
+    }
+
+    #[test]
+    fn final_pane_can_be_closed_and_recreated_without_removing_workspace() {
+        let mut state = DaemonState::new(AppSnapshot::default());
+        state
+            .handle(
+                ClientRequest::CreateWorkspace {
+                    name: "one".to_owned(),
+                    root: PathBuf::from(r"C:\work"),
+                },
+                "pwsh.exe",
+            )
+            .unwrap();
+        let workspace_id = state.snapshot().workspaces[0].id;
+        let pane_id = state.snapshot().workspaces[0].active_pane_id.unwrap();
+
+        let close = state
+            .handle(ClientRequest::ClosePane { pane_id }, "pwsh.exe")
+            .unwrap();
+        assert_eq!(close.action, StateAction::ClosePane(pane_id));
+        assert!(close.persist);
+        assert_eq!(state.snapshot().workspaces.len(), 1);
+        assert!(state.snapshot().panes.is_empty());
+        assert!(matches!(
+            state.snapshot().workspaces[0].layout,
+            LayoutNode::Empty
+        ));
+        assert_eq!(state.snapshot().workspaces[0].active_pane_id, None);
+
+        let repeated_close = state
+            .handle(ClientRequest::ClosePane { pane_id }, "pwsh.exe")
+            .unwrap();
+        assert_eq!(repeated_close.action, StateAction::None);
+
+        let create = state
+            .handle(ClientRequest::CreatePane { workspace_id }, "pwsh.exe")
+            .unwrap();
+        assert!(matches!(create.action, StateAction::SpawnPane(_)));
+        assert_eq!(state.snapshot().panes.len(), 1);
+        assert!(state.snapshot().workspaces[0].active_pane_id.is_some());
+    }
+
+    #[test]
+    fn exited_panes_do_not_dispatch_to_closed_runtime_channels() {
+        let mut state = DaemonState::new(AppSnapshot::default());
+        state
+            .handle(
+                ClientRequest::CreateWorkspace {
+                    name: "one".to_owned(),
+                    root: PathBuf::from(r"C:\work"),
+                },
+                "pwsh.exe",
+            )
+            .unwrap();
+        let pane_id = state.snapshot().panes[0].id;
+        state
+            .set_pane_status(pane_id, SessionStatus::Exited { exit_code: 2 })
+            .unwrap();
+
+        let input = state
+            .handle(
+                ClientRequest::Input {
+                    pane_id,
+                    data: b"ignored".to_vec(),
+                },
+                "pwsh.exe",
+            )
+            .unwrap();
+        assert_eq!(input.action, StateAction::None);
+
+        let resize = state
+            .handle(
+                ClientRequest::Resize {
+                    pane_id,
+                    cols: 120,
+                    rows: 40,
+                },
+                "pwsh.exe",
+            )
+            .unwrap();
+        assert_eq!(resize.action, StateAction::None);
+        assert!(resize.persist);
+        assert_eq!(state.snapshot().panes[0].cols, 120);
+        assert_eq!(state.snapshot().panes[0].rows, 40);
+
+        let close = state
+            .handle(ClientRequest::ClosePane { pane_id }, "pwsh.exe")
+            .unwrap();
+        assert_eq!(close.action, StateAction::ClosePane(pane_id));
+        assert!(state.snapshot().panes.is_empty());
+        assert!(matches!(
+            state.snapshot().workspaces[0].layout,
+            LayoutNode::Empty
+        ));
     }
 }

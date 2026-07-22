@@ -556,6 +556,7 @@ fn control_session(
                 };
                 let _ = lock(&shared.state).set_pane_status(pane_id, status.clone());
                 lock(&shared.output).emit(ServerEvent::PaneStatus { pane_id, status });
+                close_exited_pane(shared, pane_id);
                 return;
             }
             Ok(None) => {}
@@ -571,7 +572,29 @@ fn control_session(
     }
 }
 
-fn close_pane(shared: &Arc<Shared>, pane_id: PaneId) {
+fn close_exited_pane(shared: &Shared, pane_id: PaneId) {
+    let _request = lock(&shared.requests);
+    let change =
+        lock(&shared.state).handle(ClientRequest::ClosePane { pane_id }, &shared.process_label);
+    let Ok(change) = change else {
+        return;
+    };
+
+    close_pane(shared, pane_id);
+    if change.persist
+        && let Err(error) = persist_snapshot(shared)
+    {
+        lock(&shared.output).emit(ServerEvent::Error {
+            message: error.to_string(),
+        });
+    }
+    if change.publish_snapshot {
+        let snapshot = lock(&shared.state).snapshot().clone();
+        lock(&shared.output).emit(ServerEvent::WorkspaceUpdated { snapshot });
+    }
+}
+
+fn close_pane(shared: &Shared, pane_id: PaneId) {
     if let Some(session) = lock(&shared.sessions).remove(&pane_id) {
         let _ = session.control.send(Control::Stop);
     }

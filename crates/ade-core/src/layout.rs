@@ -35,6 +35,7 @@ impl SplitDirection {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum LayoutNode {
+    Empty,
     Pane {
         pane_id: PaneId,
     },
@@ -67,6 +68,7 @@ impl LayoutNode {
     #[must_use]
     pub fn contains(&self, target: PaneId) -> bool {
         match self {
+            Self::Empty => false,
             Self::Pane { pane_id } => *pane_id == target,
             Self::Split { first, second, .. } => first.contains(target) || second.contains(target),
         }
@@ -151,7 +153,7 @@ impl LayoutNode {
                 *node_ratio = ratio;
                 Ok(())
             }
-            Self::Pane { .. } => Err(LayoutError::InvalidRatio),
+            Self::Empty | Self::Pane { .. } => Err(LayoutError::InvalidRatio),
         }
     }
 
@@ -168,6 +170,7 @@ impl LayoutNode {
 
     fn collect_panes(&self, panes: &mut Vec<PaneId>) {
         match self {
+            Self::Empty => {}
             Self::Pane { pane_id } => panes.push(*pane_id),
             Self::Split { first, second, .. } => {
                 first.collect_panes(panes);
@@ -178,6 +181,7 @@ impl LayoutNode {
 
     fn find_mut(&mut self, target: PaneId) -> Option<&mut Self> {
         match self {
+            Self::Empty => None,
             Self::Pane { pane_id } => (*pane_id == target).then_some(self),
             Self::Split { first, second, .. } => {
                 first.find_mut(target).or_else(|| second.find_mut(target))
@@ -203,6 +207,7 @@ impl LayoutNode {
 
     fn validate_inner(&self, panes: &mut HashSet<PaneId>) -> Result<(), LayoutError> {
         match self {
+            Self::Empty => Ok(()),
             Self::Pane { pane_id } => {
                 if panes.insert(*pane_id) {
                     Ok(())
@@ -252,6 +257,14 @@ mod tests {
         let mut layout = LayoutNode::pane(pane);
 
         assert_eq!(layout.close(pane), Err(LayoutError::CannotCloseFinalPane));
+    }
+
+    #[test]
+    fn empty_layout_has_no_panes_and_is_valid() {
+        let layout = LayoutNode::Empty;
+
+        assert!(layout.pane_ids().is_empty());
+        layout.validate().unwrap();
     }
 
     #[test]

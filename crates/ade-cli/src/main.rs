@@ -45,7 +45,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .workspaces
                 .iter()
                 .find(|workspace| workspace.id == workspace_id)
-                .map(|workspace| workspace.active_pane_id)
+                .and_then(|workspace| workspace.active_pane_id)
                 .ok_or("the active workspace is missing")?;
             send(
                 &mut pipe,
