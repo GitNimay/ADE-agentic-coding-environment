@@ -7,6 +7,15 @@ a workspace sidebar, GPU-rendered terminal panes, persistent split layouts, scro
 support, and keyboard-driven commands. A per-user background daemon keeps terminals alive while
 the window is closed and stores workspace state in SQLite.
 
+## Install
+
+Public builds are delivered from GitHub Releases as signed Windows packages. Download and open
+[`termy.appinstaller`](https://github.com/GitNimay/ADE-agentic-coding-environment/releases/latest/download/termy.appinstaller).
+Windows App Installer handles installation and checks for signed updates on launch and in the
+background.
+
+The download becomes available after the first signed release. Windows 11 x64 is required.
+
 Each workspace supports up to six terminals. Layouts are managed by terminal count: two or three
 terminals form one row, four form a 2x2 grid, five use rows of three and two, and six use a 3x2
 grid. Dividers remain resizable and the layout compacts automatically when a terminal closes.
@@ -55,5 +64,7 @@ Default shortcuts:
 - `Ctrl+PageUp` / `Ctrl+PageDown`: switch workspace
 - `F2`: rename the active workspace
 
-Build an unsigned MSIX with `powershell -ExecutionPolicy Bypass -File packaging\build-msix.ps1`.
-Production packages must be signed with a certificate matching the manifest publisher.
+Build an unsigned development MSIX with
+`powershell -ExecutionPolicy Bypass -File packaging\build-msix.ps1`. It is intentionally unsuitable
+for public installation. Maintainer setup and the signed release process are documented in
+[`docs/releasing.md`](docs/releasing.md).
