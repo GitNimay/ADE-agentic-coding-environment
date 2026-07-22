@@ -48,7 +48,7 @@ function global:prompt {
     $location = (Get-Location).ProviderPath
     $uri = ([uri]$location).AbsoluteUri
     [Console]::Write("$global:__ade_escape]7;$uri$([char]7)")
-    [Console]::Write("$global:__ade_escape[8m__ADE_BLOCK_DIVIDER__$global:__ade_escape[0m`r`n`r`n")
+    [Console]::Write("$global:__ade_escape[8m__ADE_BLOCK_DIVIDER__$global:__ade_escape[0m`r`n`r`n`r`n")
     return "$global:__ade_escape[38;2;126;189;255m❯$global:__ade_escape[0m "
 }
 "#;
