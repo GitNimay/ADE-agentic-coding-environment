@@ -38,6 +38,7 @@ const TERMINAL_DIVIDER_MARKER: &str = "__ADE_BLOCK_DIVIDER__";
 const TERMINAL_DIVIDER_OFFSET: f32 = 7.0;
 const TERMINAL_REVEAL_DURATION: Duration = Duration::from_millis(160);
 const TERMINAL_REVEAL_OFFSET: f32 = 4.0;
+const TERMINAL_CLOSE_DURATION: Duration = Duration::from_millis(220);
 const SIDEBAR_BREAKPOINT: f32 = 600.0;
 const SIDEBAR_WIDTH: f32 = 256.0;
 const TABLET_SIDEBAR_WIDTH: f32 = 224.0;
@@ -302,11 +303,37 @@ impl AdeApp {
         context.request_repaint();
     }
 
-    fn close_active_pane(&mut self) {
-        let Some(workspace) = self.workspaces.get(self.active_workspace) else {
+    fn close_active_pane(&mut self, context: &egui::Context) {
+        let Some(workspace) = self.workspaces.get_mut(self.active_workspace) else {
             return;
         };
-        if let Some(pane_id) = workspace.model.active_pane_id {
+        if let Some(pane_id) = workspace.model.active_pane_id
+            && let Some(pane) = workspace.panes.get_mut(&pane_id)
+            && pane.close_started_at.is_none()
+        {
+            pane.close_started_at = Some(Instant::now());
+            context.request_repaint();
+        }
+    }
+
+    fn finish_pane_closes(&mut self, context: &egui::Context) {
+        let mut panes_to_close = Vec::new();
+        for workspace in &mut self.workspaces {
+            for pane in workspace.panes.values_mut() {
+                let Some(started_at) = pane.close_started_at else {
+                    continue;
+                };
+                if !pane.close_request_sent {
+                    if started_at.elapsed() >= TERMINAL_CLOSE_DURATION {
+                        pane.close_request_sent = true;
+                        panes_to_close.push(pane.id);
+                    } else {
+                        context.request_repaint();
+                    }
+                }
+            }
+        }
+        for pane_id in panes_to_close {
             self.send(ClientRequest::ClosePane { pane_id });
         }
     }
@@ -416,7 +443,7 @@ impl AdeApp {
             self.split_active(SplitDirection::Down, context);
         }
         if context.input_mut(|input| input.consume_shortcut(&shortcut(Key::W))) {
-            self.close_active_pane();
+            self.close_active_pane(context);
         }
         if context.input_mut(|input| input.consume_key(Modifiers::NONE, Key::F2))
             && let Some(workspace) = self.workspaces.get(self.active_workspace)
@@ -936,7 +963,7 @@ impl AdeApp {
             PaletteCommand::NewWorkspace => self.request_new_workspace(context),
             PaletteCommand::SplitRight => self.split_active(SplitDirection::Right, context),
             PaletteCommand::SplitDown => self.split_active(SplitDirection::Down, context),
-            PaletteCommand::ClosePane => self.close_active_pane(),
+            PaletteCommand::ClosePane => self.close_active_pane(context),
             PaletteCommand::RenameWorkspace => {
                 if let Some(workspace) = self.workspaces.get(self.active_workspace) {
                     self.rename_workspace =
@@ -1029,6 +1056,7 @@ impl eframe::App for AdeApp {
         let context = ui.ctx().clone();
         self.drain_daemon_events(&context);
         self.handle_shortcuts(&context);
+        self.finish_pane_closes(&context);
         let compact = ui.available_width() <= SIDEBAR_BREAKPOINT;
         if compact {
             window_title_bar(ui, &context);
@@ -1907,6 +1935,8 @@ struct TerminalPane {
     rows: u16,
     selection: Option<TerminalSelection>,
     reveal_started_at: Instant,
+    close_started_at: Option<Instant>,
+    close_request_sent: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -1931,12 +1961,21 @@ impl TerminalPane {
             rows: metadata.rows,
             selection: None,
             reveal_started_at: Instant::now(),
+            close_started_at: None,
+            close_request_sent: false,
         }
     }
 
     fn reveal_progress(&self) -> f32 {
         let elapsed = self.reveal_started_at.elapsed().as_secs_f32();
         (elapsed / TERMINAL_REVEAL_DURATION.as_secs_f32()).clamp(0.0, 1.0)
+    }
+
+    fn close_progress(&self) -> Option<f32> {
+        self.close_started_at.map(|started_at| {
+            (started_at.elapsed().as_secs_f32() / TERMINAL_CLOSE_DURATION.as_secs_f32())
+                .clamp(0.0, 1.0)
+        })
     }
 
     fn update_metadata(&mut self, metadata: &PaneSnapshot) {
@@ -2261,15 +2300,15 @@ fn terminal_pane_ui(
         egui::Id::new(("terminal-content", pane.id)),
         Sense::click_and_drag(),
     );
-    if response.clicked() || response.drag_started() {
+    if pane.close_started_at.is_none() && (response.clicked() || response.drag_started()) {
         *active_pane = Some(pane.id);
         let _ = requests.send(ClientRequest::FocusPane { pane_id: pane.id });
         response.request_focus();
     }
-    if response.clicked() {
+    if pane.close_started_at.is_none() && response.clicked() {
         pane.selection = None;
     }
-    if response.drag_started() {
+    if pane.close_started_at.is_none() && response.drag_started() {
         if let Some(position) = response.interact_pointer_pos().and_then(|pointer| {
             cell_at_pointer(
                 pointer,
@@ -2328,8 +2367,20 @@ fn terminal_pane_ui(
         }
     }
 
-    if active && accept_input {
+    if active && accept_input && pane.close_started_at.is_none() {
         forward_terminal_input(ui.ctx(), pane, requests);
+    }
+
+    if let Some(progress) = pane.close_progress() {
+        let pulse = (progress * std::f32::consts::PI).sin();
+        let alpha = (210.0 + 45.0 * pulse) as u8;
+        let red = Color32::from_rgba_unmultiplied(255, 105, 105, alpha);
+        ui.painter().rect_stroke(
+            rect.shrink(0.5),
+            0.0,
+            Stroke::new(1.0, red),
+            egui::StrokeKind::Inside,
+        );
     }
 }
 
