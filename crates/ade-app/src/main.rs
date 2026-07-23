@@ -2874,15 +2874,6 @@ impl WorkspaceState {
             panes,
         }
     }
-
-    fn any_running(&self) -> bool {
-        self.panes.values().any(|pane| {
-            matches!(
-                pane.status,
-                SessionStatus::Starting | SessionStatus::Running
-            )
-        })
-    }
 }
 
 fn compact_sidebar_rail(
@@ -2953,8 +2944,8 @@ fn compact_workspace_item(
     }
 
     let icon_rect = egui::Rect::from_center_size(
-        egui::pos2(rect.center().x, rect.top() + 17.0),
-        Vec2::splat(22.0),
+        egui::pos2(rect.center().x, rect.top() + 18.0),
+        Vec2::splat(26.0),
     );
     paint_workspace_icon(ui, icon_rect, workspace);
     ui.painter().text(
@@ -2987,68 +2978,148 @@ fn compact_workspace_item(
 }
 
 fn paint_workspace_icon(ui: &egui::Ui, rect: egui::Rect, workspace: &WorkspaceState) {
-    let (background, foreground) = workspace_identity_colors(workspace.model.id);
-    ui.painter().rect_filled(rect, 6.0, background);
-    ui.painter().rect_stroke(
-        rect,
-        6.0,
-        Stroke::new(1.0, foreground.gamma_multiply(0.18)),
-        egui::StrokeKind::Inside,
-    );
-    let initial = workspace
-        .model
-        .name
-        .chars()
-        .find(char::is_ascii_alphanumeric)
-        .map_or('W', |character| character.to_ascii_uppercase());
-    ui.painter().text(
-        rect.center(),
-        egui::Align2::CENTER_CENTER,
-        initial,
-        FontId::proportional(11.0),
-        foreground,
-    );
-    if workspace.any_running() {
-        let status_center = egui::pos2(rect.right() - 3.0, rect.bottom() - 3.0);
-        ui.painter()
-            .circle_filled(status_center, 2.5, Color32::from_rgb(0x10, 0x7d, 0x32));
-        ui.painter()
-            .circle_stroke(status_center, 2.5, Stroke::new(1.0, surface_primary()));
+    const GRID_SIZE: u8 = 10;
+    const BACKGROUND: Color32 = Color32::from_rgb(0x07, 0x09, 0x16);
+
+    let painter = ui.painter();
+    let seed = workspace_identity_hash(workspace.model.id);
+    let pattern = workspace_dither_pattern(seed);
+
+    // Keep the tile itself and every dither mark square. The grid is painted
+    // directly at display scale so its edges stay crisp instead of being filtered.
+    painter.rect_filled(rect, 0.0, BACKGROUND);
+
+    let inset = rect.width() * 0.03;
+    let grid_rect = rect.shrink(inset);
+    let step = grid_rect.width() / f32::from(GRID_SIZE);
+    let pixel_size = step * 0.66;
+    let pixels_per_point = ui.ctx().pixels_per_point();
+    let snap = |value: f32| (value * pixels_per_point).round() / pixels_per_point;
+
+    for row in 0..GRID_SIZE {
+        for column in 0..GRID_SIZE {
+            let pattern_index = usize::from(row) * usize::from(GRID_SIZE) + usize::from(column);
+            let Some(color) = pattern[pattern_index] else {
+                continue;
+            };
+            let center = egui::pos2(
+                grid_rect.left() + (f32::from(column) + 0.5) * step,
+                grid_rect.top() + (f32::from(row) + 0.5) * step,
+            );
+            let min = egui::pos2(
+                snap(center.x - pixel_size * 0.5),
+                snap(center.y - pixel_size * 0.5),
+            );
+            let size = snap(pixel_size).max(1.0 / pixels_per_point);
+            painter.rect_filled(
+                egui::Rect::from_min_size(min, Vec2::splat(size)),
+                0.0,
+                color,
+            );
+        }
     }
 }
 
-fn workspace_identity_colors(workspace_id: ade_core::WorkspaceId) -> (Color32, Color32) {
-    const BACKGROUNDS: [(u8, u8, u8); 7] = [
-        (0x00, 0x2f, 0x62),
-        (0x5d, 0x0e, 0x17),
-        (0x50, 0x28, 0x00),
-        (0x00, 0x3a, 0x0e),
-        (0x00, 0x3d, 0x34),
-        (0x47, 0x18, 0x5e),
-        (0x57, 0x10, 0x32),
-    ];
-    const FOREGROUNDS: [(u8, u8, u8); 7] = [
-        (0xea, 0xf6, 0xff),
-        (0xff, 0xe9, 0xed),
-        (0xff, 0xf3, 0xd5),
-        (0xd8, 0xff, 0xe4),
-        (0xcb, 0xff, 0xf5),
-        (0xfb, 0xec, 0xff),
-        (0xff, 0xe9, 0xf4),
-    ];
-    let hash = workspace_id
+fn workspace_identity_hash(workspace_id: ade_core::WorkspaceId) -> u32 {
+    workspace_id
         .to_string()
         .bytes()
         .fold(2_166_136_261_u32, |hash, byte| {
             (hash ^ u32::from(byte)).wrapping_mul(16_777_619)
-        });
-    let index = hash as usize % BACKGROUNDS.len();
-    let background = BACKGROUNDS[index];
-    let foreground = FOREGROUNDS[index];
-    (
-        Color32::from_rgb(background.0, background.1, background.2),
-        Color32::from_rgb(foreground.0, foreground.1, foreground.2),
-    )
+        })
+}
+
+fn workspace_dither_pattern(seed: u32) -> [Option<Color32>; 100] {
+    const BAYER_4X4: [u8; 16] = [
+        0, 8, 2, 10, //
+        12, 4, 14, 6, //
+        3, 11, 1, 9, //
+        15, 7, 13, 5,
+    ];
+    const PINK: Color32 = Color32::from_rgb(0xff, 0x38, 0x83);
+    const WHITE: Color32 = Color32::from_rgb(0xf8, 0xfa, 0xff);
+
+    let mut tones = [0.0; 100];
+    let mut minimum = f32::INFINITY;
+    let mut maximum = f32::NEG_INFINITY;
+
+    for row in 0_u8..10 {
+        for column in 0_u8..10 {
+            let index = usize::from(row) * 10 + usize::from(column);
+            let broad = workspace_value_noise(seed, column, row, 5);
+            let detail = workspace_value_noise(seed ^ 0xa53a_9e37, column, row, 3);
+            let tone = broad * 0.7 + detail * 0.3;
+            tones[index] = tone;
+            minimum = minimum.min(tone);
+            maximum = maximum.max(tone);
+        }
+    }
+
+    // Normalize before thresholding so each workspace keeps a useful balance of
+    // ink and negative space regardless of the random field's original range.
+    let range = (maximum - minimum).max(f32::EPSILON);
+    let mut pattern = [None; 100];
+    let mut highlight_index = 0;
+    let mut highlight_score = f32::NEG_INFINITY;
+
+    for row in 0_u8..10 {
+        for column in 0_u8..10 {
+            let index = usize::from(row) * 10 + usize::from(column);
+            let normalized_tone = (tones[index] - minimum) / range;
+            let bayer_index = usize::from((row % 4) * 4 + column % 4);
+            let ordered_threshold = (f32::from(BAYER_4X4[bayer_index]) + 0.5) / 16.0;
+            let score = normalized_tone - (0.12 + ordered_threshold * 0.84);
+            if score > 0.0 {
+                pattern[index] = Some(PINK);
+                if score > highlight_score {
+                    highlight_score = score;
+                    highlight_index = index;
+                }
+            }
+        }
+    }
+
+    pattern[highlight_index] = Some(WHITE);
+    pattern
+}
+
+fn workspace_value_noise(seed: u32, column: u8, row: u8, scale: u8) -> f32 {
+    let grid_x = column / scale;
+    let grid_y = row / scale;
+    let local_x = workspace_smoothstep(f32::from(column % scale) / f32::from(scale));
+    let local_y = workspace_smoothstep(f32::from(row % scale) / f32::from(scale));
+
+    let top = egui::lerp(
+        workspace_noise_anchor(seed, grid_x, grid_y)
+            ..=workspace_noise_anchor(seed, grid_x + 1, grid_y),
+        local_x,
+    );
+    let bottom = egui::lerp(
+        workspace_noise_anchor(seed, grid_x, grid_y + 1)
+            ..=workspace_noise_anchor(seed, grid_x + 1, grid_y + 1),
+        local_x,
+    );
+    egui::lerp(top..=bottom, local_y)
+}
+
+fn workspace_noise_anchor(seed: u32, column: u8, row: u8) -> f32 {
+    let hash = mix_u32(
+        seed ^ u32::from(column).wrapping_mul(0x9e37_79b9)
+            ^ u32::from(row).wrapping_mul(0x85eb_ca6b),
+    );
+    f32::from(hash.to_le_bytes()[0]) / 255.0
+}
+
+fn workspace_smoothstep(value: f32) -> f32 {
+    value * value * (3.0 - 2.0 * value)
+}
+
+fn mix_u32(mut value: u32) -> u32 {
+    value ^= value >> 16;
+    value = value.wrapping_mul(0x7feb_352d);
+    value ^= value >> 15;
+    value = value.wrapping_mul(0x846c_a68b);
+    value ^ (value >> 16)
 }
 
 fn workspace_row(
@@ -3087,7 +3158,7 @@ fn workspace_row(
     let content = rect.shrink2(Vec2::new(8.0, 4.0));
     let icon_rect = egui::Rect::from_center_size(
         egui::pos2(content.left() + 12.0, content.center().y),
-        Vec2::splat(24.0),
+        Vec2::splat(28.0),
     );
     paint_workspace_icon(ui, icon_rect, workspace);
 
@@ -5824,22 +5895,25 @@ mod tests {
     }
 
     #[test]
-    fn workspace_identity_colors_are_stable_and_use_vercel_palette() {
-        let workspace_id = ade_core::WorkspaceId::new();
-        let colors = workspace_identity_colors(workspace_id);
-        assert_eq!(colors, workspace_identity_colors(workspace_id));
+    fn workspace_dither_is_stable_and_uses_one_color_plus_white() {
+        let workspace_id = "00000000-0000-4000-8000-000000000001"
+            .parse::<ade_core::WorkspaceId>()
+            .unwrap();
+        let seed = workspace_identity_hash(workspace_id);
+        assert_eq!(seed, workspace_identity_hash(workspace_id));
+
+        let pattern = workspace_dither_pattern(seed);
+        let cells: Vec<_> = pattern.iter().flatten().copied().collect();
+        assert!((25..=75).contains(&cells.len()));
+        let identity_color = Color32::from_rgb(0xff, 0x38, 0x83);
+        let white = Color32::from_rgb(0xf8, 0xfa, 0xff);
         assert!(
-            [
-                Color32::from_rgb(0x00, 0x2f, 0x62),
-                Color32::from_rgb(0x5d, 0x0e, 0x17),
-                Color32::from_rgb(0x50, 0x28, 0x00),
-                Color32::from_rgb(0x00, 0x3a, 0x0e),
-                Color32::from_rgb(0x00, 0x3d, 0x34),
-                Color32::from_rgb(0x47, 0x18, 0x5e),
-                Color32::from_rgb(0x57, 0x10, 0x32),
-            ]
-            .contains(&colors.0)
+            cells
+                .iter()
+                .all(|color| [identity_color, white].contains(color))
         );
+        assert_eq!(cells.iter().filter(|color| **color == white).count(), 1);
+        assert_eq!(pattern, workspace_dither_pattern(seed));
     }
 
     #[test]
