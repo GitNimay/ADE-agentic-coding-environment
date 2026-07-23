@@ -864,7 +864,7 @@ impl AdeApp {
                 && panel.response.rect.y_range().contains(position.y)
         });
         let panel_hovered = pointer.is_some_and(|position| panel.response.rect.contains(position));
-        self.update_sidebar_hover(panel_hovered || edge_hovered, context_menu_open);
+        self.update_sidebar_hover(panel_hovered || edge_hovered, context_menu_open, context);
 
         if create_workspace {
             self.request_new_workspace(context);
@@ -872,7 +872,12 @@ impl AdeApp {
         self.handle_workspace_action(action);
     }
 
-    fn update_sidebar_hover(&mut self, hovered: bool, context_menu_open: bool) {
+    fn update_sidebar_hover(
+        &mut self,
+        hovered: bool,
+        context_menu_open: bool,
+        context: &egui::Context,
+    ) {
         let now = Instant::now();
         if context_menu_open {
             self.sidebar_open = true;
@@ -886,18 +891,24 @@ impl AdeApp {
                 self.sidebar_left_at = None;
             } else {
                 let left_at = self.sidebar_left_at.get_or_insert(now);
-                if now.duration_since(*left_at) >= SIDEBAR_CLOSE_DELAY {
+                let elapsed = now.duration_since(*left_at);
+                if elapsed >= SIDEBAR_CLOSE_DELAY {
                     self.sidebar_open = false;
                     self.sidebar_left_at = None;
+                } else {
+                    context.request_repaint_after(SIDEBAR_CLOSE_DELAY.saturating_sub(elapsed));
                 }
             }
         } else {
             self.sidebar_left_at = None;
             if hovered {
                 let hover_started = self.sidebar_hover_started.get_or_insert(now);
-                if now.duration_since(*hover_started) >= SIDEBAR_OPEN_DELAY {
+                let elapsed = now.duration_since(*hover_started);
+                if elapsed >= SIDEBAR_OPEN_DELAY {
                     self.sidebar_open = true;
                     self.sidebar_hover_started = None;
+                } else {
+                    context.request_repaint_after(SIDEBAR_OPEN_DELAY.saturating_sub(elapsed));
                 }
             } else {
                 self.sidebar_hover_started = None;
@@ -2883,7 +2894,10 @@ fn terminal_pane_ui(
         egui::Id::new(("terminal-content", pane.id)),
         Sense::click_and_drag() | Sense::hover(),
     );
-    if pane.close_started_at.is_none() && (response.clicked() || response.drag_started()) {
+    // `clicked()` also fires for Enter/Space on an egui-focused pane.
+    if pane.close_started_at.is_none()
+        && (response.clicked_by(egui::PointerButton::Primary) || response.drag_started())
+    {
         *active_pane = Some(pane.id);
         let _ = requests.send(ClientRequest::FocusPane { pane_id: pane.id });
         response.request_focus();
@@ -3008,7 +3022,7 @@ fn terminal_pane_ui(
             }
         }
     } else {
-        if pane.close_started_at.is_none() && response.clicked() {
+        if pane.close_started_at.is_none() && response.clicked_by(egui::PointerButton::Primary) {
             pane.selection = None;
         }
         if pane.close_started_at.is_none() && response.drag_started() {

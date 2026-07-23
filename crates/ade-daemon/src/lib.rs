@@ -339,7 +339,9 @@ impl DaemonState {
                 Ok(StateChange::mutation(StateAction::None))
             }
             ClientRequest::Input { pane_id, data } => {
-                let pane = self.pane(pane_id)?;
+                let Some(pane) = self.snapshot.panes.iter().find(|pane| pane.id == pane_id) else {
+                    return Ok(StateChange::runtime(StateAction::None));
+                };
                 let action = if pane_has_live_session(&pane.status) {
                     StateAction::Input { pane_id, data }
                 } else {
@@ -355,12 +357,14 @@ impl DaemonState {
                 if cols == 0 || rows == 0 {
                     return Err(DaemonError::InvalidTerminalSize);
                 }
-                let pane = self
+                let Some(pane) = self
                     .snapshot
                     .panes
                     .iter_mut()
                     .find(|pane| pane.id == pane_id)
-                    .ok_or(DaemonError::PaneNotFound(pane_id))?;
+                else {
+                    return Ok(StateChange::runtime(StateAction::None));
+                };
                 pane.cols = cols;
                 pane.rows = rows;
                 let action = if pane_has_live_session(&pane.status) {
@@ -763,5 +767,29 @@ mod tests {
             state.snapshot().workspaces[0].layout,
             LayoutNode::Empty
         ));
+
+        let stale_input = state
+            .handle(
+                ClientRequest::Input {
+                    pane_id,
+                    data: b"ignored".to_vec(),
+                },
+                "pwsh.exe",
+            )
+            .unwrap();
+        assert_eq!(stale_input.action, StateAction::None);
+
+        let stale_resize = state
+            .handle(
+                ClientRequest::Resize {
+                    pane_id,
+                    cols: 120,
+                    rows: 40,
+                },
+                "pwsh.exe",
+            )
+            .unwrap();
+        assert_eq!(stale_resize.action, StateAction::None);
+        assert!(!stale_resize.persist);
     }
 }

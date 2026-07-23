@@ -433,12 +433,9 @@ fn apply_action(action: StateAction, shared: &Arc<Shared>) -> Result<(), DaemonE
             }
         }
         StateAction::Input { pane_id, data } => {
-            lock(&shared.sessions)
-                .get(&pane_id)
-                .ok_or(DaemonError::PaneNotFound(pane_id))?
-                .input
-                .send(data)
-                .map_err(|_| DaemonError::PaneNotFound(pane_id))?;
+            if let Some(session) = lock(&shared.sessions).get(&pane_id) {
+                let _ = session.input.send(data);
+            }
         }
         StateAction::Resize {
             pane_id,
@@ -446,12 +443,9 @@ fn apply_action(action: StateAction, shared: &Arc<Shared>) -> Result<(), DaemonE
             rows,
         } => {
             let size = PtySize::new(cols, rows)?;
-            lock(&shared.sessions)
-                .get(&pane_id)
-                .ok_or(DaemonError::PaneNotFound(pane_id))?
-                .control
-                .send(Control::Resize(size))
-                .map_err(|_| DaemonError::PaneNotFound(pane_id))?;
+            if let Some(session) = lock(&shared.sessions).get(&pane_id) {
+                let _ = session.control.send(Control::Resize(size));
+            }
         }
     }
     Ok(())

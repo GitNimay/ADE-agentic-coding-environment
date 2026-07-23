@@ -575,4 +575,33 @@ mod tests {
             String::from_utf8_lossy(&output)
         );
     }
+
+    #[test]
+    fn child_exit_does_not_end_root_powershell() {
+        let powershell = PathBuf::from(std::env::var_os("WINDIR").unwrap())
+            .join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
+        let current_directory = std::env::current_dir().unwrap();
+        let command = SpawnCommand::new(powershell, current_directory).arguments([
+            "-NoLogo",
+            "-NoProfile",
+            "-NoExit",
+            "-Command",
+            "cmd.exe /d /c exit 0; Write-Output ADE_CHILD_EXIT_OK",
+        ]);
+        let mut session = ConPtySession::spawn(&command, PtySize::new(120, 40).unwrap()).unwrap();
+        let mut output = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        while !output
+            .windows(b"ADE_CHILD_EXIT_OK".len())
+            .any(|window| window == b"ADE_CHILD_EXIT_OK")
+        {
+            let read = session.read(&mut buffer).unwrap();
+            assert!(read > 0, "ConPTY closed before emitting the marker");
+            output.extend_from_slice(&buffer[..read]);
+        }
+
+        assert_eq!(session.try_wait().unwrap(), None);
+        session.write_all(b"exit\r").unwrap();
+        assert!(session.wait_for(Duration::from_secs(5)).unwrap().is_some());
+    }
 }
