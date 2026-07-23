@@ -2,11 +2,11 @@
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, BufRead, BufReader, Write};
 use std::os::windows::io::AsRawHandle;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -58,6 +58,9 @@ const SIDEBAR_TRIGGER_WIDTH: f32 = 16.0;
 const SIDEBAR_OPEN_DELAY: Duration = Duration::from_millis(180);
 const SIDEBAR_CLOSE_DELAY: Duration = Duration::from_millis(450);
 const UPDATE_IDLE_DURATION: Duration = Duration::from_mins(5);
+const CODEX_USAGE_REFRESH_INTERVAL: Duration = Duration::from_secs(20);
+const CODEX_USAGE_HOVER_BRIDGE: Duration = Duration::from_millis(360);
+const CHATGPT_LOGO_SVG: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path fill="#fff" d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.872zm16.5963 3.8558L13.1038 8.364 15.1192 7.2a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.407-.667zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997Z"/></svg>"##;
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const DETACHED_PROCESS: u32 = 0x0000_0008;
@@ -86,6 +89,333 @@ enum AppUpdateState {
         version: String,
         restart_after: bool,
     },
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct CodexUsageSnapshot {
+    plan_type: Option<String>,
+    primary: Option<CodexUsageWindow>,
+    secondary: Option<CodexUsageWindow>,
+    credits_balance: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CodexUsageWindow {
+    used_percent: u8,
+    window_duration_mins: Option<i64>,
+    resets_at: Option<i64>,
+}
+
+struct CodexUsageMonitor {
+    results: Receiver<Result<CodexUsageSnapshot, String>>,
+    stop_sender: Sender<()>,
+    snapshot: Option<CodexUsageSnapshot>,
+    unavailable: bool,
+    panel_hovered: bool,
+    keep_open_until: Option<Instant>,
+}
+
+impl CodexUsageMonitor {
+    fn new(context: &egui::Context) -> Self {
+        let (result_sender, results) = unbounded();
+        let (stop_sender, stop_results) = unbounded();
+        let repaint_context = context.clone();
+        let worker_started = match thread::Builder::new()
+            .name("termy-codex-usage".to_owned())
+            .spawn(move || {
+                loop {
+                    let result = poll_codex_usage();
+                    if result_sender.send(result).is_err() {
+                        break;
+                    }
+                    repaint_context.request_repaint();
+                    if stop_results
+                        .recv_timeout(CODEX_USAGE_REFRESH_INTERVAL)
+                        .is_ok()
+                    {
+                        break;
+                    }
+                }
+            }) {
+            Ok(_) => true,
+            Err(error) => {
+                diagnostic_log(&format!("could not start Codex usage monitor: {error}"));
+                false
+            }
+        };
+        Self {
+            results,
+            stop_sender,
+            snapshot: None,
+            unavailable: !worker_started,
+            panel_hovered: false,
+            keep_open_until: None,
+        }
+    }
+
+    fn drain(&mut self) {
+        while let Ok(result) = self.results.try_recv() {
+            match result {
+                Ok(snapshot) => {
+                    self.snapshot = Some(snapshot);
+                    self.unavailable = false;
+                }
+                Err(error) => {
+                    if !self.unavailable {
+                        diagnostic_log(&format!("Codex usage is unavailable: {error}"));
+                    }
+                    self.unavailable = true;
+                }
+            }
+        }
+    }
+
+    fn show(&mut self, ui: &mut egui::Ui, context: &egui::Context) {
+        self.drain();
+        let (rect, response) = ui.allocate_exact_size(
+            Vec2::new(34.0, WINDOW_TITLE_BAR_HEIGHT),
+            Sense::focusable_noninteractive(),
+        );
+        let minimum_remaining = self
+            .snapshot
+            .as_ref()
+            .and_then(minimum_codex_remaining_percent);
+        let label = minimum_remaining.map_or_else(
+            || "Codex usage".to_owned(),
+            |remaining| format!("Codex usage, {remaining}% remaining"),
+        );
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), &label)
+        });
+        let now = Instant::now();
+        if response.hovered() || response.has_focus() || self.panel_hovered {
+            self.keep_open_until = Some(now + CODEX_USAGE_HOVER_BRIDGE);
+        }
+        let open = self.keep_open_until.is_some_and(|deadline| deadline > now);
+        let reveal = context.animate_bool_with_time_and_easing(
+            egui::Id::new("codex-usage-reveal"),
+            open,
+            0.16,
+            egui::emath::easing::cubic_out,
+        );
+
+        if response.hovered() || response.has_focus() {
+            ui.painter()
+                .rect_filled(rect.shrink2(Vec2::new(3.0, 4.0)), 7.0, surface_hover());
+        }
+        paint_codex_mark(
+            ui,
+            rect,
+            if self.unavailable && self.snapshot.is_none() {
+                text_disabled()
+            } else {
+                text_primary()
+            },
+            1.0,
+        );
+        let status_color = match minimum_remaining {
+            Some(remaining) => codex_usage_color(remaining),
+            None => text_disabled(),
+        };
+        ui.painter()
+            .circle_filled(rect.center() + Vec2::new(7.0, 7.0), 1.75, status_color);
+
+        if reveal > 0.01 {
+            let width = (context.content_rect().width() - 48.0).clamp(240.0, 360.0);
+            let position = egui::pos2(
+                rect.right() - width,
+                rect.bottom() - 2.0 - 4.0 * (1.0 - reveal),
+            );
+            let area = egui::Area::new(egui::Id::new("codex-usage-panel"))
+                .order(egui::Order::Foreground)
+                .fixed_pos(position)
+                .show(context, |ui| {
+                    ui.set_width(width);
+                    egui::Frame::NONE
+                        .fill(Color32::from_rgb(10, 10, 10))
+                        .stroke(Stroke::new(1.0, border()))
+                        .corner_radius(12.0)
+                        .shadow(egui::epaint::Shadow {
+                            offset: [0, 8],
+                            blur: 24,
+                            spread: 0,
+                            color: Color32::from_black_alpha(100).gamma_multiply(reveal),
+                        })
+                        .inner_margin(egui::Margin::same(16))
+                        .show(ui, |ui| {
+                            ui.set_opacity(reveal);
+                            show_codex_usage_panel(ui, self.snapshot.as_ref(), self.unavailable);
+                        });
+                });
+            self.panel_hovered = context
+                .pointer_hover_pos()
+                .is_some_and(|pointer| area.response.rect.contains(pointer));
+            context.request_repaint_after(Duration::from_millis(16));
+        } else {
+            self.panel_hovered = false;
+            self.keep_open_until = None;
+        }
+        response.on_hover_cursor(egui::CursorIcon::Default);
+    }
+}
+
+impl Drop for CodexUsageMonitor {
+    fn drop(&mut self) {
+        let _ = self.stop_sender.send(());
+    }
+}
+
+fn poll_codex_usage() -> Result<CodexUsageSnapshot, String> {
+    let executable = find_codex_executable()
+        .ok_or_else(|| "the Codex CLI executable was not found".to_owned())?;
+    let mut child = Command::new(executable)
+        .args(["app-server", "--stdio"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| format!("could not start Codex: {error}"))?;
+    let result = (|| {
+        let mut input = child
+            .stdin
+            .take()
+            .ok_or_else(|| "Codex stdin is unavailable".to_owned())?;
+        let output = child
+            .stdout
+            .take()
+            .ok_or_else(|| "Codex stdout is unavailable".to_owned())?;
+        let mut lines = BufReader::new(output).lines();
+        writeln!(
+            input,
+            "{}",
+            serde_json::json!({
+                "method": "initialize",
+                "id": 0,
+                "params": {
+                    "clientInfo": {
+                        "name": "termy",
+                        "title": "Termy",
+                        "version": env!("CARGO_PKG_VERSION")
+                    },
+                    "capabilities": { "experimentalApi": true }
+                }
+            })
+        )
+        .map_err(|error| error.to_string())?;
+        input.flush().map_err(|error| error.to_string())?;
+        read_codex_response(&mut lines, 0)?;
+
+        writeln!(
+            input,
+            "{}",
+            serde_json::json!({ "method": "initialized", "params": {} })
+        )
+        .map_err(|error| error.to_string())?;
+        writeln!(
+            input,
+            "{}",
+            serde_json::json!({ "method": "account/rateLimits/read", "id": 1 })
+        )
+        .map_err(|error| error.to_string())?;
+        input.flush().map_err(|error| error.to_string())?;
+        let value = read_codex_response(&mut lines, 1)?;
+        parse_codex_usage_snapshot(
+            value
+                .get("result")
+                .ok_or_else(|| "Codex returned no usage result".to_owned())?,
+        )
+        .ok_or_else(|| "Codex returned no rate-limit windows".to_owned())
+    })();
+    let _ = child.kill();
+    let _ = child.wait();
+    result
+}
+
+fn find_codex_executable() -> Option<PathBuf> {
+    let app_data = std::env::var_os("APPDATA").map(PathBuf::from);
+    if let Some(app_data) = app_data {
+        let npm_package = app_data
+            .join("npm")
+            .join("node_modules")
+            .join("@openai")
+            .join("codex")
+            .join("node_modules")
+            .join("@openai")
+            .join("codex-win32-x64")
+            .join("vendor")
+            .join("x86_64-pc-windows-msvc")
+            .join("bin")
+            .join("codex.exe");
+        if npm_package.is_file() {
+            return Some(npm_package);
+        }
+    }
+    if let Some(paths) = std::env::var_os("PATH") {
+        for directory in std::env::split_paths(&paths) {
+            let candidate = directory.join("codex.exe");
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+fn read_codex_response(
+    lines: &mut impl Iterator<Item = io::Result<String>>,
+    expected_id: i64,
+) -> Result<serde_json::Value, String> {
+    for line in lines {
+        let line = line.map_err(|error| error.to_string())?;
+        let value: serde_json::Value =
+            serde_json::from_str(&line).map_err(|error| error.to_string())?;
+        if value.get("id").and_then(serde_json::Value::as_i64) != Some(expected_id) {
+            continue;
+        }
+        if let Some(error) = value.get("error") {
+            return Err(format!("Codex app-server error: {error}"));
+        }
+        return Ok(value);
+    }
+    Err("Codex app-server disconnected".to_owned())
+}
+
+fn parse_codex_usage_snapshot(value: &serde_json::Value) -> Option<CodexUsageSnapshot> {
+    let fallback = value.get("rateLimits")?;
+    let limits = value
+        .get("rateLimitsByLimitId")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|limits| limits.get("codex").or_else(|| limits.values().next()))
+        .unwrap_or(fallback);
+    let parse_window = |name: &str| {
+        let window = limits.get(name)?;
+        Some(CodexUsageWindow {
+            used_percent: window
+                .get("usedPercent")?
+                .as_u64()?
+                .min(100)
+                .try_into()
+                .ok()?,
+            window_duration_mins: window
+                .get("windowDurationMins")
+                .and_then(serde_json::Value::as_i64),
+            resets_at: window.get("resetsAt").and_then(serde_json::Value::as_i64),
+        })
+    };
+    let snapshot = CodexUsageSnapshot {
+        plan_type: limits
+            .get("planType")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        primary: parse_window("primary"),
+        secondary: parse_window("secondary"),
+        credits_balance: limits
+            .pointer("/credits/balance")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+    };
+    (snapshot.primary.is_some() || snapshot.secondary.is_some()).then_some(snapshot)
 }
 
 fn official_build_version() -> Option<&'static str> {
@@ -418,11 +748,13 @@ struct AdeApp {
     deferred_update: Option<String>,
     last_user_activity: Instant,
     restart_executable: Option<PathBuf>,
+    codex_usage: CodexUsageMonitor,
 }
 
 impl AdeApp {
     fn new(creation_context: &eframe::CreationContext<'_>) -> Self {
         configure_style(&creation_context.egui_ctx);
+        egui_extras::install_image_loaders(&creation_context.egui_ctx);
         let client = DaemonClient::connect(&creation_context.egui_ctx);
         let error_message = client.as_ref().err().map(ToString::to_string);
         let (update_sender, update_results) = unbounded();
@@ -469,6 +801,7 @@ impl AdeApp {
             deferred_update: None,
             last_user_activity: Instant::now(),
             restart_executable: std::env::current_exe().ok(),
+            codex_usage: CodexUsageMonitor::new(&creation_context.egui_ctx),
         };
         cleanup_old_clipboard_images();
         app.send(ClientRequest::Attach);
@@ -1655,11 +1988,11 @@ impl eframe::App for AdeApp {
 
         let compact = ui.available_width() <= SIDEBAR_BREAKPOINT;
         if compact {
-            window_title_bar(ui, &context);
+            window_title_bar(ui, &context, &mut self.codex_usage);
             self.sidebar(ui, &context);
         } else {
             self.sidebar(ui, &context);
-            window_title_bar(ui, &context);
+            window_title_bar(ui, &context, &mut self.codex_usage);
         }
 
         let requests = self.client.as_ref().map(|client| client.requests.clone());
@@ -1754,7 +2087,11 @@ enum WindowControl {
     Close,
 }
 
-fn window_title_bar(root_ui: &mut egui::Ui, context: &egui::Context) {
+fn window_title_bar(
+    root_ui: &mut egui::Ui,
+    context: &egui::Context,
+    codex_usage: &mut CodexUsageMonitor,
+) {
     let maximized = context.input(|input| input.viewport().maximized.unwrap_or(false));
     let panel = egui::Panel::top("window-title-bar")
         .exact_size(WINDOW_TITLE_BAR_HEIGHT)
@@ -1770,6 +2107,7 @@ fn window_title_bar(root_ui: &mut egui::Ui, context: &egui::Context) {
                 if window_control_button(ui, WindowControl::Minimize, maximized).clicked() {
                     context.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                 }
+                codex_usage.show(ui, context);
 
                 let drag_rect = ui.available_rect_before_wrap();
                 let drag = ui.interact(
@@ -1808,6 +2146,248 @@ fn window_title_bar(root_ui: &mut egui::Ui, context: &egui::Context) {
         ),
         0.0,
         border(),
+    );
+}
+
+fn minimum_codex_remaining_percent(snapshot: &CodexUsageSnapshot) -> Option<u8> {
+    snapshot
+        .primary
+        .iter()
+        .chain(snapshot.secondary.iter())
+        .map(|window| 100_u8.saturating_sub(window.used_percent))
+        .min()
+}
+
+fn codex_usage_color(remaining: u8) -> Color32 {
+    match remaining {
+        0..=5 => danger(),
+        6..=20 => Color32::from_rgb(245, 166, 35),
+        _ => text_primary(),
+    }
+}
+
+fn show_codex_usage_panel(
+    ui: &mut egui::Ui,
+    snapshot: Option<&CodexUsageSnapshot>,
+    unavailable: bool,
+) {
+    ui.horizontal(|ui| {
+        let (mark_rect, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
+        paint_codex_mark(ui, mark_rect, text_primary(), 1.0);
+        ui.label(
+            RichText::new("Codex")
+                .size(14.0)
+                .strong()
+                .color(text_primary()),
+        );
+        if let Some(plan) = snapshot.and_then(|snapshot| snapshot.plan_type.as_deref()) {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                egui::Frame::NONE
+                    .fill(surface_hover())
+                    .stroke(Stroke::new(1.0, border()))
+                    .corner_radius(6.0)
+                    .inner_margin(egui::Margin::symmetric(7, 4))
+                    .show(ui, |ui| {
+                        ui.label(
+                            RichText::new(codex_plan_label(plan))
+                                .size(12.0)
+                                .strong()
+                                .color(text_primary()),
+                        );
+                    });
+            });
+        }
+    });
+    ui.add_space(16.0);
+
+    if let Some(snapshot) = snapshot {
+        for (shown, window) in [snapshot.primary.as_ref(), snapshot.secondary.as_ref()]
+            .into_iter()
+            .flatten()
+            .enumerate()
+        {
+            if shown > 0 {
+                ui.add_space(16.0);
+            }
+            show_codex_usage_window(ui, window);
+        }
+        if let Some(balance) = &snapshot.credits_balance {
+            ui.add_space(16.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Credits").size(13.0).color(text_secondary()));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(
+                        RichText::new(codex_credits_label(balance))
+                            .size(13.0)
+                            .family(FontFamily::Monospace)
+                            .strong()
+                            .color(text_primary()),
+                    );
+                });
+            });
+        }
+        show_codex_usage_footer(ui, unavailable);
+    } else {
+        ui.label(
+            RichText::new(if unavailable {
+                "Codex usage unavailable"
+            } else {
+                "Connecting to Codex…"
+            })
+            .size(14.0)
+            .strong()
+            .color(text_primary()),
+        );
+        ui.add_space(6.0);
+        ui.label(
+            RichText::new(if unavailable {
+                "Install or sign in to the Codex CLI to view your limits."
+            } else {
+                "Reading your current account limits securely."
+            })
+            .size(13.0)
+            .color(text_secondary()),
+        );
+    }
+}
+
+fn show_codex_usage_footer(ui: &mut egui::Ui, unavailable: bool) {
+    ui.add_space(15.0);
+    let (divider, _) = ui.allocate_exact_size(
+        Vec2::new(ui.available_width(), 1.0 / ui.ctx().pixels_per_point()),
+        Sense::hover(),
+    );
+    ui.painter().rect_filled(divider, 0.0, border());
+    ui.add_space(11.0);
+    ui.horizontal(|ui| {
+        ui.painter().circle_filled(
+            ui.cursor().left_center() + Vec2::new(2.5, 0.0),
+            2.5,
+            if unavailable {
+                Color32::from_rgb(245, 166, 35)
+            } else {
+                Color32::from_rgb(70, 167, 88)
+            },
+        );
+        ui.add_space(9.0);
+        ui.label(
+            RichText::new(if unavailable {
+                "Reconnecting · showing last update"
+            } else {
+                "Live · refreshes every 20 seconds"
+            })
+            .size(12.0)
+            .color(text_secondary()),
+        );
+    });
+}
+
+fn show_codex_usage_window(ui: &mut egui::Ui, window: &CodexUsageWindow) {
+    let remaining = 100_u8.saturating_sub(window.used_percent);
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new(codex_window_label(window.window_duration_mins))
+                .size(13.0)
+                .color(text_secondary()),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(
+                RichText::new(format!("{remaining}% left"))
+                    .size(13.0)
+                    .family(FontFamily::Monospace)
+                    .strong()
+                    .color(codex_usage_color(remaining)),
+            );
+        });
+    });
+    ui.add_space(8.0);
+    let (bar, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 4.0), Sense::hover());
+    ui.painter().rect_filled(bar, 2.0, border());
+    if remaining > 0 {
+        let fill = egui::Rect::from_min_size(
+            bar.min,
+            Vec2::new(bar.width() * f32::from(remaining) / 100.0, bar.height()),
+        );
+        ui.painter()
+            .rect_filled(fill, 2.0, codex_usage_color(remaining));
+    }
+    if let Some(resets_at) = window.resets_at {
+        ui.add_space(8.0);
+        ui.label(
+            RichText::new(format!("Resets {}", codex_reset_label(resets_at)))
+                .size(12.0)
+                .color(text_disabled()),
+        );
+    }
+}
+
+fn codex_window_label(duration_mins: Option<i64>) -> String {
+    match duration_mins {
+        Some(300) => "5-hour limit".to_owned(),
+        Some(10_080) => "Weekly limit".to_owned(),
+        Some(minutes) if minutes > 0 && minutes % 1_440 == 0 => {
+            format!("{}-day limit", minutes / 1_440)
+        }
+        Some(minutes) if minutes > 0 && minutes % 60 == 0 => {
+            format!("{}-hour limit", minutes / 60)
+        }
+        _ => "Rolling limit".to_owned(),
+    }
+}
+
+fn codex_reset_label(resets_at: i64) -> String {
+    let now = i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+    )
+    .unwrap_or(i64::MAX);
+    let remaining = resets_at.saturating_sub(now);
+    if remaining <= 0 {
+        return "now".to_owned();
+    }
+    let days = remaining / 86_400;
+    let hours = (remaining % 86_400) / 3_600;
+    let minutes = (remaining % 3_600) / 60;
+    if days > 0 {
+        format!("in {days}d {hours}h")
+    } else if hours > 0 {
+        format!("in {hours}h {minutes}m")
+    } else {
+        format!("in {}m", minutes.max(1))
+    }
+}
+
+fn codex_plan_label(plan: &str) -> &str {
+    match plan {
+        "free" => "Free",
+        "go" => "Go",
+        "plus" => "Plus",
+        "pro" => "Pro",
+        "prolite" => "Pro Lite",
+        "team" => "Team",
+        "business" | "self_serve_business_usage_based" => "Business",
+        "enterprise" | "enterprise_cbp_usage_based" => "Enterprise",
+        "edu" => "Edu",
+        _ => "Codex",
+    }
+}
+
+fn codex_credits_label(balance: &str) -> String {
+    balance
+        .parse::<f64>()
+        .map_or_else(|_| balance.to_owned(), |balance| format!("{balance:.2}"))
+}
+
+fn paint_codex_mark(ui: &mut egui::Ui, available_rect: egui::Rect, color: Color32, scale: f32) {
+    let logo_rect =
+        egui::Rect::from_center_size(available_rect.center(), Vec2::splat(14.0 * scale));
+    ui.put(
+        logo_rect,
+        egui::Image::from_bytes("bytes://openai/chatgpt-logo.svg", CHATGPT_LOGO_SVG)
+            .tint(color)
+            .sense(Sense::hover()),
     );
 }
 
@@ -4934,6 +5514,44 @@ mod tests {
             b"MZ updater regression fixture"
         );
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn codex_usage_parser_prefers_the_codex_limit_bucket() {
+        let value = serde_json::json!({
+            "rateLimits": {
+                "primary": { "usedPercent": 90 }
+            },
+            "rateLimitsByLimitId": {
+                "other": {
+                    "primary": { "usedPercent": 80 }
+                },
+                "codex": {
+                    "planType": "plus",
+                    "primary": {
+                        "usedPercent": 27,
+                        "windowDurationMins": 300,
+                        "resetsAt": 1_800_000_000
+                    },
+                    "secondary": {
+                        "usedPercent": 41,
+                        "windowDurationMins": 10_080,
+                        "resetsAt": 1_800_100_000
+                    },
+                    "credits": { "balance": "1010.9695550000" }
+                }
+            }
+        });
+
+        let snapshot = parse_codex_usage_snapshot(&value).unwrap();
+
+        assert_eq!(snapshot.plan_type.as_deref(), Some("plus"));
+        assert_eq!(snapshot.primary.as_ref().unwrap().used_percent, 27);
+        assert_eq!(snapshot.secondary.as_ref().unwrap().used_percent, 41);
+        assert_eq!(minimum_codex_remaining_percent(&snapshot), Some(59));
+        assert_eq!(codex_window_label(Some(300)), "5-hour limit");
+        assert_eq!(codex_window_label(Some(10_080)), "Weekly limit");
+        assert_eq!(codex_credits_label("1010.9695550000"), "1010.97");
     }
 
     #[test]

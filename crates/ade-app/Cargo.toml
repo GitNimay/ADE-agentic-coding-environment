@@ -13,9 +13,11 @@ arboard.workspace = true
 base64.workspace = true
 crossbeam-channel.workspace = true
 eframe.workspace = true
+egui_extras = { version = "0.35.0", features = ["svg"] }
 image.workspace = true
 rfd.workspace = true
 self_update = { version = "0.44.0", default-features = false, features = ["ureq", "rustls"] }
+serde_json.workspace = true
 vt100.workspace = true
 windows.workspace = true
 
