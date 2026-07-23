@@ -31,6 +31,9 @@ gh run list --branch main
 gh run watch --exit-status
 ```
 
-Official executables use the embedded CI version to check GitHub's latest release in the background
-at startup. A newer `termy.exe` replaces the current file in place and takes effect on the user's
-next restart. Local builds do not self-update.
+Official executables use the embedded CI version to check GitHub's latest release metadata in the
+background at startup. A newer release opens an in-app notice instead of installing immediately.
+**Update and restart** installs that exact release tag and reopens the UI without stopping the
+terminal daemon. **Later** dismisses the notice and installs in the background after five minutes
+without keyboard or pointer activity; that update takes effect on the next restart. Local builds do
+not self-update.

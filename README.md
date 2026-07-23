@@ -15,9 +15,10 @@ to a permanent folder and run it. Windows 11 x64 is required.
 
 The standalone build is free and currently unsigned, so Windows SmartScreen may show an unknown
 publisher warning. GitHub records build-provenance attestations for release executables. Official
-builds check the latest GitHub Release in the background, replace the executable when a newer
-version is available, and ask for a convenient restart. Workspace data remains in the user's local
-application-data directory.
+builds check the latest GitHub Release in the background and show an update notice when a newer
+version is available. Users can update and restart immediately or defer a quiet installation until
+Termy has been idle for five minutes. Workspace data remains in the user's local application-data
+directory.
 
 Each workspace supports up to six terminals. Layouts are managed by terminal count: two or three
 terminals form one row, four form a 2x2 grid, five use rows of three and two, and six use a 3x2

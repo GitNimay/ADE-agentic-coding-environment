@@ -56,24 +56,43 @@ const WINDOW_TITLE_BAR_HEIGHT: f32 = 36.0;
 const SIDEBAR_TRIGGER_WIDTH: f32 = 16.0;
 const SIDEBAR_OPEN_DELAY: Duration = Duration::from_millis(180);
 const SIDEBAR_CLOSE_DELAY: Duration = Duration::from_millis(450);
+const UPDATE_IDLE_DURATION: Duration = Duration::from_mins(5);
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const DETACHED_PROCESS: u32 = 0x0000_0008;
 const RELEASE_REPOSITORY_OWNER: &str = "GitNimay";
 const RELEASE_REPOSITORY_NAME: &str = "ADE-agentic-coding-environment";
 
-enum UpdateNotice {
+enum UpdateEvent {
+    CheckComplete(Option<String>),
     Installed(String),
+    Failed(String),
+}
+
+#[derive(Clone)]
+enum AppUpdateState {
+    Idle,
+    Checking,
+    Available {
+        version: String,
+        error: Option<String>,
+    },
+    Installing {
+        version: String,
+        restart_after: bool,
+    },
 }
 
 fn official_build_version() -> Option<&'static str> {
     option_env!("TERMY_BUILD_VERSION")
 }
 
-fn install_latest_release(
+fn configured_updater(
     current_version: &str,
-) -> Result<self_update::Status, self_update::errors::Error> {
-    self_update::backends::github::Update::configure()
+    target_version: Option<&str>,
+) -> Result<Box<dyn self_update::update::ReleaseUpdate>, String> {
+    let mut updater = self_update::backends::github::Update::configure();
+    updater
         .repo_owner(RELEASE_REPOSITORY_OWNER)
         .repo_name(RELEASE_REPOSITORY_NAME)
         .bin_name("termy")
@@ -81,9 +100,37 @@ fn install_latest_release(
         .current_version(current_version)
         .no_confirm(true)
         .show_output(false)
-        .show_download_progress(false)
-        .build()?
+        .show_download_progress(false);
+    if let Some(version) = target_version {
+        updater.target_version_tag(&format!("v{version}"));
+    }
+    updater.build().map_err(|error| error.to_string())
+}
+
+fn check_latest_release(current_version: &str) -> Result<Option<String>, String> {
+    let updater = configured_updater(current_version, None)?;
+    let release = updater
+        .get_latest_release()
+        .map_err(|error| error.to_string())?;
+    self_update::version::bump_is_greater(current_version, &release.version)
+        .map(|newer| newer.then_some(release.version))
+        .map_err(|error| error.to_string())
+}
+
+fn install_release(current_version: &str, target_version: &str) -> Result<String, String> {
+    let status = configured_updater(current_version, Some(target_version))?
         .update()
+        .map_err(|error| error.to_string())?;
+    Ok(status.version().to_owned())
+}
+
+fn deferred_update_delay(last_activity: Instant, now: Instant) -> Option<Duration> {
+    let idle = now.saturating_duration_since(last_activity);
+    (idle < UPDATE_IDLE_DURATION).then(|| {
+        UPDATE_IDLE_DURATION
+            .checked_sub(idle)
+            .expect("idle duration was checked")
+    })
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -360,8 +407,12 @@ struct AdeApp {
     close_requested: bool,
     shutdown_requested: bool,
     paste_shortcut_down: bool,
-    update_results: Receiver<UpdateNotice>,
-    update_message: Option<String>,
+    update_results: Receiver<UpdateEvent>,
+    update_sender: Sender<UpdateEvent>,
+    update_state: AppUpdateState,
+    deferred_update: Option<String>,
+    last_user_activity: Instant,
+    restart_executable: Option<PathBuf>,
 }
 
 impl AdeApp {
@@ -370,18 +421,25 @@ impl AdeApp {
         let client = DaemonClient::connect(&creation_context.egui_ctx);
         let error_message = client.as_ref().err().map(ToString::to_string);
         let (update_sender, update_results) = unbounded();
+        let mut update_state = AppUpdateState::Idle;
         if let Some(version) = official_build_version() {
+            update_state = AppUpdateState::Checking;
             let repaint_context = creation_context.egui_ctx.clone();
-            let _ = thread::Builder::new()
+            let sender = update_sender.clone();
+            if let Err(error) = thread::Builder::new()
                 .name("termy-auto-update".to_owned())
-                .spawn(move || match install_latest_release(version) {
-                    Ok(self_update::Status::Updated(updated_version)) => {
-                        let _ = update_sender.send(UpdateNotice::Installed(updated_version));
-                        repaint_context.request_repaint();
-                    }
-                    Ok(self_update::Status::UpToDate(_)) => {}
-                    Err(error) => diagnostic_log(&format!("automatic update failed: {error}")),
-                });
+                .spawn(move || {
+                    let event = match check_latest_release(version) {
+                        Ok(available) => UpdateEvent::CheckComplete(available),
+                        Err(error) => UpdateEvent::Failed(error),
+                    };
+                    let _ = sender.send(event);
+                    repaint_context.request_repaint();
+                })
+            {
+                diagnostic_log(&format!("could not start update check: {error}"));
+                update_state = AppUpdateState::Idle;
+            }
         }
         let mut app = Self {
             workspaces: Vec::new(),
@@ -401,7 +459,11 @@ impl AdeApp {
             shutdown_requested: false,
             paste_shortcut_down: false,
             update_results,
-            update_message: None,
+            update_sender,
+            update_state,
+            deferred_update: None,
+            last_user_activity: Instant::now(),
+            restart_executable: std::env::current_exe().ok(),
         };
         cleanup_old_clipboard_images();
         app.send(ClientRequest::Attach);
@@ -437,28 +499,205 @@ impl AdeApp {
         ui.send_viewport_cmd(egui::ViewportCommand::Close);
     }
 
-    fn drain_update_results(&mut self) {
-        while let Ok(UpdateNotice::Installed(version)) = self.update_results.try_recv() {
-            self.update_message = Some(format!(
-                "Termy {version} was installed. Restart Termy when convenient to use it."
-            ));
+    fn drain_update_results(&mut self, context: &egui::Context) {
+        while let Ok(event) = self.update_results.try_recv() {
+            match event {
+                UpdateEvent::CheckComplete(Some(version)) => {
+                    self.update_state = AppUpdateState::Available {
+                        version,
+                        error: None,
+                    };
+                }
+                UpdateEvent::CheckComplete(None) => self.update_state = AppUpdateState::Idle,
+                UpdateEvent::Installed(version) => {
+                    let restart_after = matches!(
+                        self.update_state,
+                        AppUpdateState::Installing {
+                            restart_after: true,
+                            ..
+                        }
+                    );
+                    self.deferred_update = None;
+                    self.update_state = AppUpdateState::Idle;
+                    diagnostic_log(&format!("installed Termy {version}"));
+                    if restart_after && let Err(error) = self.restart_after_update(context) {
+                        diagnostic_log(&format!("could not restart after update: {error}"));
+                        self.update_state = AppUpdateState::Available {
+                            version,
+                            error: Some(
+                                "Update installed, but Termy could not restart.".to_owned(),
+                            ),
+                        };
+                    }
+                }
+                UpdateEvent::Failed(error) => {
+                    diagnostic_log(&format!("automatic update failed: {error}"));
+                    self.update_state = match &self.update_state {
+                        AppUpdateState::Installing { version, .. } => AppUpdateState::Available {
+                            version: version.clone(),
+                            error: Some(
+                                "Could not install the update. Try again later.".to_owned(),
+                            ),
+                        },
+                        _ => AppUpdateState::Idle,
+                    };
+                }
+            }
         }
     }
 
-    fn show_update_notice(&mut self, context: &egui::Context) {
-        let Some(message) = self.update_message.clone() else {
+    fn note_user_activity(&mut self, context: &egui::Context) {
+        if context.input(|input| !input.events.is_empty() || input.pointer.any_down()) {
+            self.last_user_activity = Instant::now();
+        }
+    }
+
+    fn start_deferred_update_if_idle(&mut self, context: &egui::Context) {
+        if !matches!(self.update_state, AppUpdateState::Idle) {
+            return;
+        }
+        let Some(version) = self.deferred_update.clone() else {
             return;
         };
-        egui::Window::new("Update installed")
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::RIGHT_BOTTOM, Vec2::new(-16.0, -44.0))
+        if let Some(delay) = deferred_update_delay(self.last_user_activity, Instant::now()) {
+            context.request_repaint_after(delay);
+        } else {
+            self.start_update(version, false, context);
+        }
+    }
+
+    fn start_update(&mut self, version: String, restart_after: bool, context: &egui::Context) {
+        let Some(current_version) = official_build_version() else {
+            return;
+        };
+        self.update_state = AppUpdateState::Installing {
+            version: version.clone(),
+            restart_after,
+        };
+        self.deferred_update = None;
+        let sender = self.update_sender.clone();
+        let repaint_context = context.clone();
+        let install_version = version.clone();
+        if let Err(error) = thread::Builder::new()
+            .name("termy-update-install".to_owned())
+            .spawn(move || {
+                let event = install_release(current_version, &install_version)
+                    .map_or_else(UpdateEvent::Failed, UpdateEvent::Installed);
+                let _ = sender.send(event);
+                repaint_context.request_repaint();
+            })
+        {
+            self.update_state = AppUpdateState::Available {
+                version,
+                error: Some("Could not start the update. Try again later.".to_owned()),
+            };
+            diagnostic_log(&format!("could not start update installer: {error}"));
+        }
+    }
+
+    fn restart_after_update(&mut self, context: &egui::Context) -> io::Result<()> {
+        let executable = self
+            .restart_executable
+            .as_ref()
+            .ok_or_else(|| io::Error::other("current executable path is unavailable"))?;
+        Command::new(executable)
+            .creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS)
+            .spawn()?;
+        // Close only this UI process. The daemon keeps terminal sessions alive for the new window.
+        self.shutdown_requested = true;
+        context.send_viewport_cmd(egui::ViewportCommand::Close);
+        Ok(())
+    }
+
+    fn show_update_notice(&mut self, context: &egui::Context) {
+        let state = self.update_state.clone();
+        let (version, error, installing) = match state {
+            AppUpdateState::Available { version, error } => (version, error, false),
+            AppUpdateState::Installing { version, .. } => (version, None, true),
+            AppUpdateState::Idle | AppUpdateState::Checking => return,
+        };
+        let width = (context.content_rect().width() - 32.0).clamp(300.0, 390.0);
+        let mut action = None;
+        egui::Area::new(egui::Id::new("update-notice"))
+            .order(egui::Order::Foreground)
+            .anchor(egui::Align2::RIGHT_BOTTOM, Vec2::new(-16.0, -16.0))
             .show(context, |ui| {
-                ui.label(message);
-                if ui.button("Dismiss").clicked() {
-                    self.update_message = None;
-                }
+                ui.set_width(width);
+                egui::Frame::NONE
+                    .fill(Color32::from_rgb(10, 10, 10))
+                    .stroke(Stroke::new(1.0, border()))
+                    .corner_radius(10.0)
+                    .shadow(egui::epaint::Shadow {
+                        offset: [0, 8],
+                        blur: 24,
+                        spread: 0,
+                        color: Color32::from_black_alpha(190),
+                    })
+                    .inner_margin(egui::Margin::same(16))
+                    .show(ui, |ui| {
+                        ui.set_width(width - 34.0);
+                        ui.horizontal(|ui| {
+                            paint_update_icon(ui, installing);
+                            ui.vertical(|ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        RichText::new(if installing {
+                                            "Installing update"
+                                        } else {
+                                            "Update available"
+                                        })
+                                        .size(14.0)
+                                        .strong()
+                                        .color(text_primary()),
+                                    );
+                                    update_version_badge(ui, &version);
+                                });
+                                ui.add_space(2.0);
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(if installing {
+                                            "Termy will be ready in a moment. Your terminals stay running."
+                                        } else {
+                                            "Restart now to use the latest version, or install it quietly when you're idle."
+                                        })
+                                        .size(12.5)
+                                        .color(text_secondary()),
+                                    )
+                                    .wrap(),
+                                );
+                            });
+                        });
+                        if let Some(error) = error {
+                            ui.add_space(10.0);
+                            ui.label(RichText::new(error).size(12.0).color(Color32::from_rgb(238, 91, 91)));
+                        }
+                        if !installing {
+                            ui.add_space(14.0);
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if update_notice_button(ui, "Update and restart", true).clicked() {
+                                        action = Some(true);
+                                    }
+                                    if update_notice_button(ui, "Later", false).clicked() {
+                                        action = Some(false);
+                                    }
+                                },
+                            );
+                        }
+                    });
             });
+
+        match action {
+            Some(true) => self.start_update(version, true, context),
+            Some(false) => {
+                self.deferred_update = Some(version);
+                self.last_user_activity = Instant::now();
+                self.update_state = AppUpdateState::Idle;
+                context.request_repaint_after(UPDATE_IDLE_DURATION);
+            }
+            None => {}
+        }
     }
 
     fn create_workspace(&mut self, name: String, root: &Path, _context: &egui::Context) {
@@ -1389,7 +1628,9 @@ impl eframe::App for AdeApp {
     #[allow(clippy::too_many_lines)]
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let context = ui.ctx().clone();
-        self.drain_update_results();
+        self.note_user_activity(&context);
+        self.drain_update_results(&context);
+        self.start_deferred_update_if_idle(&context);
         self.drain_daemon_events(&context);
         self.handle_shortcuts(&context);
         self.finish_pane_closes(&context);
@@ -1631,6 +1872,95 @@ fn window_control_button(
             );
         }
     }
+    response
+}
+
+fn paint_update_icon(ui: &mut egui::Ui, installing: bool) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(32.0), Sense::hover());
+    if installing {
+        ui.put(rect.shrink(6.0), egui::Spinner::new().size(16.0));
+        return;
+    }
+    let center = rect.center();
+    let stroke = Stroke::new(1.25, text_primary());
+    ui.painter()
+        .circle_stroke(center, 12.0, Stroke::new(1.0, border_hover()));
+    ui.painter().line_segment(
+        [center + Vec2::new(0.0, -5.0), center + Vec2::new(0.0, 4.0)],
+        stroke,
+    );
+    ui.painter().line_segment(
+        [center + Vec2::new(-3.5, 1.0), center + Vec2::new(0.0, 4.5)],
+        stroke,
+    );
+    ui.painter().line_segment(
+        [center + Vec2::new(3.5, 1.0), center + Vec2::new(0.0, 4.5)],
+        stroke,
+    );
+}
+
+fn update_version_badge(ui: &mut egui::Ui, version: &str) {
+    egui::Frame::NONE
+        .fill(Color32::from_rgb(26, 26, 26))
+        .stroke(Stroke::new(1.0, border()))
+        .corner_radius(4.0)
+        .inner_margin(egui::Margin::symmetric(6, 2))
+        .show(ui, |ui| {
+            ui.label(
+                RichText::new(format!("v{version}"))
+                    .font(FontId::monospace(10.0))
+                    .color(text_secondary()),
+            );
+        });
+}
+
+fn update_notice_button(ui: &mut egui::Ui, label: &str, primary: bool) -> egui::Response {
+    let width = if primary { 142.0 } else { 68.0 };
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 32.0), Sense::click());
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
+    });
+    let hovered = response.hovered() || response.has_focus();
+    let pressed = response.is_pointer_button_down_on();
+    let (fill, text, stroke) = if primary {
+        (
+            if pressed {
+                Color32::from_rgb(205, 205, 205)
+            } else if hovered {
+                Color32::WHITE
+            } else {
+                text_primary()
+            },
+            Color32::BLACK,
+            Color32::WHITE,
+        )
+    } else {
+        (
+            if pressed {
+                surface_active()
+            } else if hovered {
+                surface_hover()
+            } else {
+                Color32::BLACK
+            },
+            text_primary(),
+            if hovered { border_hover() } else { border() },
+        )
+    };
+    ui.painter().rect(
+        rect,
+        6.0,
+        fill,
+        Stroke::new(1.0, stroke),
+        egui::StrokeKind::Inside,
+    );
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        label,
+        FontId::proportional(12.0),
+        text,
+    );
     response
 }
 
@@ -3061,13 +3391,15 @@ fn terminal_pane_ui(
     }
 
     if active && !screen.hide_cursor() {
-        let cursor_min = egui::pos2(
-            grid_origin.x + f32::from(cursor_column) * cell_width,
-            grid_origin.y + f32::from(cursor_row) * cell_height + 2.0,
-        );
-        let cursor_rect =
-            egui::Rect::from_min_size(cursor_min, Vec2::new(2.0, (cell_height - 4.0).max(2.0)))
-                .intersect(content_rect);
+        let cursor_rect = terminal_cursor_rect(
+            grid_origin,
+            cursor_row,
+            cursor_column,
+            cell_width,
+            cell_height,
+            pixels_per_point,
+        )
+        .intersect(content_rect);
         ui.painter().rect_filled(cursor_rect, 1.0, text_primary());
     }
 
@@ -3560,7 +3892,7 @@ fn partial_sequence_suffix(bytes: &[u8], sequence: &[u8]) -> usize {
 
 fn terminal_visual_end_row(screen: &vt100::Screen) -> u16 {
     let (rows, columns) = screen.size();
-    (0..rows)
+    let content_end = (0..rows)
         .rev()
         .find(|&row| {
             (0..columns).any(|column| {
@@ -3571,7 +3903,10 @@ fn terminal_visual_end_row(screen: &vt100::Screen) -> u16 {
                 })
             })
         })
-        .unwrap_or(0)
+        .unwrap_or(0);
+    // Line editors erase the active row before redrawing it. Keep that temporarily empty row in
+    // the visual extent so bottom anchoring does not jump during every keystroke.
+    content_end.max(screen.cursor_position().0)
 }
 
 fn is_terminal_divider_row(screen: &vt100::Screen, row: u16) -> bool {
@@ -3953,6 +4288,26 @@ fn cells_for_pixels(pixels: f32, cell_size: f32) -> u16 {
     (pixels / cell_size).floor().clamp(2.0, f32::from(i16::MAX)) as u16
 }
 
+fn terminal_cursor_rect(
+    grid_origin: egui::Pos2,
+    row: u16,
+    column: u16,
+    cell_width: f32,
+    cell_height: f32,
+    pixels_per_point: f32,
+) -> egui::Rect {
+    let width = 2.0_f32.min(cell_width);
+    let height = (cell_height - 4.0).max(2.0).min(cell_height);
+    let center = egui::pos2(
+        snap_to_pixel(
+            grid_origin.x + (f32::from(column) + 0.5) * cell_width,
+            pixels_per_point,
+        ),
+        grid_origin.y + (f32::from(row) + 0.5) * cell_height,
+    );
+    egui::Rect::from_center_size(center, Vec2::new(width, height))
+}
+
 fn terminal_limit_reached(terminal_count: usize) -> bool {
     terminal_count >= MAX_TERMINALS_PER_WORKSPACE
 }
@@ -4247,6 +4602,27 @@ mod tests {
     }
 
     #[test]
+    fn deferred_update_waits_for_five_idle_minutes() {
+        let last_activity = Instant::now();
+        assert_eq!(
+            deferred_update_delay(last_activity, last_activity + Duration::from_mins(1)),
+            Some(Duration::from_mins(4))
+        );
+        assert_eq!(
+            deferred_update_delay(last_activity, last_activity + UPDATE_IDLE_DURATION),
+            None
+        );
+    }
+
+    #[test]
+    fn terminal_cursor_is_centered_in_its_cell() {
+        let rect = terminal_cursor_rect(egui::pos2(10.0, 20.0), 2, 3, 8.0, 18.0, 1.0);
+
+        assert_eq!(rect.center(), egui::pos2(38.0, 65.0));
+        assert_eq!(rect.size(), Vec2::new(2.0, 14.0));
+    }
+
+    #[test]
     fn terminal_limit_popup_starts_at_six_terminals() {
         assert!(!terminal_limit_reached(5));
         assert!(terminal_limit_reached(6));
@@ -4292,6 +4668,17 @@ mod tests {
         parser.process(b"\x1b[1;1H\x1b[3;4H\x1b[2;2H");
         assert_eq!(parser.screen().cursor_position(), (1, 1));
         assert_eq!(terminal_visual_end_row(parser.screen()), 2);
+    }
+
+    #[test]
+    fn erased_input_row_keeps_the_visual_grid_anchored() {
+        let mut parser = vt100::Parser::new(12, 80, 100);
+        parser.process(b"history\r\n\r\n\r\nprompt> command");
+        assert_eq!(terminal_visual_end_row(parser.screen()), 3);
+
+        parser.process(b"\r\x1b[2K");
+        assert_eq!(parser.screen().cursor_position().0, 3);
+        assert_eq!(terminal_visual_end_row(parser.screen()), 3);
     }
 
     #[test]

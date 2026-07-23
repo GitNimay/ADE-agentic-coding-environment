@@ -557,9 +557,11 @@ directory instead.
 
 Every successful CI run caused by a push to `main` publishes `termy.exe` directly in a GitHub
 Release. Official builds check that release feed in a background thread at startup. When a newer
-semantic version exists, the executable is replaced in place without interrupting live terminals;
-the UI asks the user to restart when convenient. Update failures are recorded in the diagnostic
-log and do not prevent startup. The supported target is Windows 11 x64.
+semantic version exists, a bottom-right notice offers **Update and restart** or **Later**. Immediate
+updates reopen the UI while the daemon keeps live terminals running. Deferred updates install in
+the background after five minutes without keyboard or pointer activity and activate on the next
+restart. Update failures are recorded in the diagnostic log and do not prevent startup. The
+supported target is Windows 11 x64.
 
 The repository also contains `packaging/build-msix.ps1` for producing an unsigned development
 MSIX. That package is for local testing and is not part of public releases. See
