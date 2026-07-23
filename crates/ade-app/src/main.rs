@@ -716,41 +716,6 @@ impl AdeApp {
         {
             self.focus_relative_workspace(false);
         }
-        // Consume plain Ctrl+letter shortcuts so they don't leak to the OS as
-        // accelerators (e.g. Ctrl+O opening the Windows Open File dialog).
-        // The terminal still receives the correct control character via encode_key.
-        for key in [
-            Key::A,
-            Key::B,
-            Key::C,
-            Key::D,
-            Key::E,
-            Key::F,
-            Key::G,
-            Key::H,
-            Key::I,
-            Key::J,
-            Key::K,
-            Key::L,
-            Key::M,
-            Key::N,
-            Key::O,
-            Key::P,
-            Key::Q,
-            Key::R,
-            Key::S,
-            Key::T,
-            Key::U,
-            Key::V,
-            Key::W,
-            Key::X,
-            Key::Y,
-            Key::Z,
-        ] {
-            context.input_mut(|input| {
-                input.consume_shortcut(&KeyboardShortcut::new(Modifiers::CTRL, key));
-            });
-        }
     }
 
     fn focus_relative_workspace(&mut self, forward: bool) {
@@ -4262,6 +4227,24 @@ mod tests {
         assert_eq!(terminal_divider_rows(parser.screen()), vec![1]);
         assert!(!is_terminal_divider_row(parser.screen(), 0));
         assert!(!is_terminal_divider_row(parser.screen(), 2));
+    }
+
+    #[test]
+    fn plain_ctrl_letter_keys_encode_for_terminal_apps() {
+        let parser = vt100::Parser::new(12, 80, 100);
+
+        assert_eq!(
+            encode_key(Key::A, Modifiers::CTRL, parser.screen()),
+            Some(vec![0x01])
+        );
+        assert_eq!(
+            encode_key(Key::D, Modifiers::CTRL, parser.screen()),
+            Some(vec![0x04])
+        );
+        assert_eq!(
+            encode_key(Key::P, Modifiers::CTRL, parser.screen()),
+            Some(vec![0x10])
+        );
     }
 
     #[test]
