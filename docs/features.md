@@ -474,6 +474,8 @@ PowerShell and PowerShell Core are started with `-NoExit -Command` and a prompt 
 - imports PSReadLine when available;
 - enables inline history prediction when supported;
 - maps Right Arrow to accept a suggestion;
+- reports the latest local PowerShell history entry to the UI so an empty prompt can offer a
+  Warp-style recent-command suggestion;
 - emits OSC 7 working-directory updates;
 - emits hidden command-block divider markers; and
 - renders a colored `❯` prompt.

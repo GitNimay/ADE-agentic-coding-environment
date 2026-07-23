@@ -30,23 +30,24 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_INSERT, V
 use windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
 
 const SCROLLBACK_LINES: usize = 10_000;
-const TERMINAL_FONT_SIZE: f32 = 14.0;
 const DIVIDER_SIZE: f32 = 6.0;
 const MIN_PANE_WIDTH: f32 = 220.0;
 const MIN_PANE_HEIGHT: f32 = 120.0;
-const TERMINAL_SIDE_PADDING: f32 = 10.0;
-const TERMINAL_BOTTOM_PADDING: f32 = 10.0;
-const TERMINAL_FOOTER_HEIGHT: f32 = 28.0;
 const GIT_REFRESH_INTERVAL: Duration = Duration::from_millis(1500);
 const TERMINAL_DIVIDER_MARKER: &str = "__ADE_BLOCK_DIVIDER__";
 const TERMINAL_DIVIDER_OFFSET: f32 = 7.0;
 const TERMINAL_REVEAL_DURATION: Duration = Duration::from_millis(160);
 const TERMINAL_REVEAL_OFFSET: f32 = 4.0;
 const TERMINAL_CLOSE_DURATION: Duration = Duration::from_millis(220);
+const TERMINAL_CURSOR_STEADY_DURATION: Duration = Duration::from_millis(520);
+const TERMINAL_CURSOR_BLINK_PERIOD: Duration = Duration::from_millis(1_100);
+const TERMINAL_CURSOR_FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const SYNCHRONIZED_OUTPUT_TIMEOUT: Duration = Duration::from_millis(150);
 const SYNCHRONIZED_OUTPUT_LIMIT: usize = 1024 * 1024;
 const SYNCHRONIZED_OUTPUT_BEGIN: &[u8] = b"\x1b[?2026h";
 const SYNCHRONIZED_OUTPUT_END: &[u8] = b"\x1b[?2026l";
+const RECENT_COMMAND_OSC_PREFIX: &[u8] = b"\x1b]6973;";
+const RECENT_COMMAND_LIMIT: usize = 4096;
 const SIDEBAR_BREAKPOINT: f32 = 600.0;
 const SIDEBAR_WIDTH: f32 = 256.0;
 const TABLET_SIDEBAR_WIDTH: f32 = 224.0;
@@ -2682,6 +2683,8 @@ struct TerminalPane {
     mouse_buttons: u8,
     pending_output: Vec<u8>,
     synchronized_output_since: Option<Instant>,
+    recent_command: Option<String>,
+    cursor_last_activity: Instant,
     reveal_started_at: Instant,
     close_started_at: Option<Instant>,
     close_request_sent: bool,
@@ -2713,6 +2716,39 @@ struct TerminalSelection {
     end: CellPosition,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct TerminalSizing {
+    font_size: f32,
+    side_padding: f32,
+    bottom_padding: f32,
+    footer_height: f32,
+}
+
+fn terminal_sizing(rect: egui::Rect) -> TerminalSizing {
+    if rect.width() < 520.0 || rect.height() < 320.0 {
+        TerminalSizing {
+            font_size: 14.5,
+            side_padding: 8.0,
+            bottom_padding: 8.0,
+            footer_height: 26.0,
+        }
+    } else if rect.width() < 900.0 || rect.height() < 520.0 {
+        TerminalSizing {
+            font_size: 15.5,
+            side_padding: 12.0,
+            bottom_padding: 12.0,
+            footer_height: 28.0,
+        }
+    } else {
+        TerminalSizing {
+            font_size: 17.0,
+            side_padding: 16.0,
+            bottom_padding: 16.0,
+            footer_height: 30.0,
+        }
+    }
+}
+
 impl TerminalPane {
     fn new(metadata: &PaneSnapshot) -> Self {
         let (git_result_sender, git_results) = unbounded();
@@ -2726,6 +2762,8 @@ impl TerminalPane {
             mouse_buttons: 0,
             pending_output: Vec::new(),
             synchronized_output_since: None,
+            recent_command: None,
+            cursor_last_activity: Instant::now(),
             reveal_started_at: Instant::now(),
             close_started_at: None,
             close_request_sent: false,
@@ -2786,8 +2824,47 @@ impl TerminalPane {
     }
 
     fn process_output(&mut self, data: &[u8]) {
+        if !data.is_empty() {
+            self.cursor_last_activity = Instant::now();
+        }
         self.pending_output.extend_from_slice(data);
         self.process_complete_output_frames();
+    }
+
+    fn handle_recent_command_osc(&mut self) {
+        use base64::Engine;
+        loop {
+            let Some(start) = find_bytes(&self.pending_output, RECENT_COMMAND_OSC_PREFIX) else {
+                return;
+            };
+            let value_start = start + RECENT_COMMAND_OSC_PREFIX.len();
+            let rest = &self.pending_output[value_start..];
+            let end_pos = rest
+                .iter()
+                .position(|&byte| byte == 0x07)
+                .or_else(|| rest.windows(2).position(|window| window == b"\x1b\\"));
+            let Some(end_offset) = end_pos else {
+                return;
+            };
+            let encoded = &rest[..end_offset];
+            let sequence_end = value_start
+                + end_offset
+                + if rest.get(end_offset..end_offset + 2) == Some(b"\x1b\\") {
+                    2
+                } else {
+                    1
+                };
+            if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(encoded)
+                && decoded.len() <= RECENT_COMMAND_LIMIT
+                && let Ok(command) = String::from_utf8(decoded)
+            {
+                let command = command.trim();
+                if !command.is_empty() {
+                    self.recent_command = Some(command.to_owned());
+                }
+            }
+            self.pending_output.drain(start..sequence_end);
+        }
     }
 
     fn handle_osc52_clipboard(&mut self) {
@@ -2825,6 +2902,7 @@ impl TerminalPane {
 
     fn process_complete_output_frames(&mut self) {
         self.handle_osc52_clipboard();
+        self.handle_recent_command_osc();
         loop {
             if self.synchronized_output_since.is_some() {
                 if let Some(end) = find_bytes(&self.pending_output, SYNCHRONIZED_OUTPUT_END) {
@@ -3114,20 +3192,21 @@ fn terminal_pane_ui(
     }
     pane.flush_expired_synchronized_output(ui.ctx());
     pane.refresh_git_status();
-    let footer_top = (rect.bottom() - TERMINAL_FOOTER_HEIGHT).max(rect.top());
+    let sizing = terminal_sizing(rect);
+    let footer_top = (rect.bottom() - sizing.footer_height).max(rect.top());
     let footer_rect = egui::Rect::from_min_max(egui::pos2(rect.left(), footer_top), rect.max);
     let content_min = egui::pos2(
-        (rect.left() + TERMINAL_SIDE_PADDING).min(rect.right()),
-        (rect.top() + TERMINAL_BOTTOM_PADDING).min(rect.bottom()),
+        (rect.left() + sizing.side_padding).min(rect.right()),
+        (rect.top() + sizing.bottom_padding).min(rect.bottom()),
     );
     let content_rect = egui::Rect::from_min_max(
         content_min,
         egui::pos2(
-            (rect.right() - TERMINAL_SIDE_PADDING).max(content_min.x),
-            (footer_top - TERMINAL_BOTTOM_PADDING).max(content_min.y),
+            (rect.right() - sizing.side_padding).max(content_min.x),
+            (footer_top - sizing.bottom_padding).max(content_min.y),
         ),
     );
-    let font_id = FontId::new(TERMINAL_FONT_SIZE, FontFamily::Monospace);
+    let font_id = FontId::new(sizing.font_size, FontFamily::Monospace);
     let (cell_width, measured_height) = ui.fonts_mut(|fonts| {
         (
             fonts.glyph_width(&font_id, 'M').max(1.0),
@@ -3160,9 +3239,11 @@ fn terminal_pane_ui(
     );
     let current_block_top = if block_chrome {
         divider_rows.last().map(|row| {
-            snap_to_pixel(
-                grid_origin.y + f32::from(row.saturating_add(1)) * cell_height
-                    - TERMINAL_DIVIDER_OFFSET,
+            terminal_command_header_top(
+                grid_origin.y,
+                *row,
+                cell_height,
+                sizing.bottom_padding,
                 pixels_per_point,
             )
         })
@@ -3180,19 +3261,19 @@ fn terminal_pane_ui(
             .rect_filled(dock_rect, 0.0, terminal_background());
         if active {
             ui.painter().rect_filled(
-                egui::Rect::from_min_size(
-                    egui::pos2(rect.left(), dock_top + 7.0),
-                    Vec2::new(2.0, cell_height),
+                egui::Rect::from_min_max(
+                    egui::pos2(rect.left(), dock_top),
+                    egui::pos2(rect.left() + 2.0, footer_top),
                 ),
-                1.0,
+                0.0,
                 Color32::from_rgb(0, 110, 254),
             );
         }
     }
 
-    paint_terminal_footer(ui, footer_rect, active);
+    paint_terminal_footer(ui, footer_rect, active, sizing.side_padding);
 
-    let job = terminal_layout_job(&pane.parser, pane.selection, cell_height);
+    let job = terminal_layout_job(&pane.parser, pane.selection, cell_height, sizing.font_size);
     let galley = ui.fonts_mut(|fonts| fonts.layout_job(job));
     ui.painter()
         .with_clip_rect(content_rect)
@@ -3217,7 +3298,14 @@ fn terminal_pane_ui(
             egui::pos2(rect.left(), header_top),
             egui::pos2(rect.right(), header_top + 2.0 * cell_height),
         );
-        paint_command_header(ui, header_rect, &pane.cwd, pane.git_status.as_ref(), active);
+        paint_command_header(
+            ui,
+            header_rect,
+            &pane.cwd,
+            pane.git_status.as_ref(),
+            active,
+            sizing.side_padding,
+        );
     }
     let response = ui.interact(
         content_rect,
@@ -3390,7 +3478,36 @@ fn terminal_pane_ui(
         }
     }
 
+    let recent_command = (block_chrome
+        && cursor_column <= 2
+        && current_block_top.is_some()
+        && pane.close_started_at.is_none())
+    .then(|| pane.recent_command.clone())
+    .flatten();
+    if let Some(command) = recent_command.as_deref()
+        && paint_recent_command_suggestion(
+            ui,
+            pane.id,
+            content_rect,
+            grid_origin,
+            cursor_row,
+            cursor_column,
+            cell_width,
+            cell_height,
+            sizing.font_size,
+            command,
+            active,
+        )
+        && active
+        && accept_input
+    {
+        pane.send(requests, command.as_bytes().to_vec());
+    }
+
     if active && !screen.hide_cursor() {
+        let (cursor_opacity, repaint_after) =
+            terminal_cursor_animation(pane.cursor_last_activity.elapsed());
+        ui.ctx().request_repaint_after(repaint_after);
         let cursor_rect = terminal_cursor_rect(
             grid_origin,
             cursor_row,
@@ -3400,7 +3517,13 @@ fn terminal_pane_ui(
             pixels_per_point,
         )
         .intersect(content_rect);
-        ui.painter().rect_filled(cursor_rect, 1.0, text_primary());
+        if cursor_opacity > 0.0 {
+            ui.painter().rect_filled(
+                cursor_rect,
+                0.0,
+                text_primary().gamma_multiply(cursor_opacity),
+            );
+        }
     }
 
     if response.hovered() {
@@ -3463,7 +3586,7 @@ fn terminal_pane_ui(
     }
 
     if active && accept_input && pane.close_started_at.is_none() {
-        forward_terminal_input(ui.ctx(), pane, requests);
+        forward_terminal_input(ui.ctx(), pane, requests, recent_command.as_deref());
     }
 
     if let Some(progress) = pane.close_progress() {
@@ -3479,7 +3602,7 @@ fn terminal_pane_ui(
     }
 }
 
-fn paint_terminal_footer(ui: &mut egui::Ui, rect: egui::Rect, active: bool) {
+fn paint_terminal_footer(ui: &mut egui::Ui, rect: egui::Rect, active: bool, side_padding: f32) {
     ui.painter().hline(
         rect.x_range(),
         rect.top(),
@@ -3491,7 +3614,7 @@ fn paint_terminal_footer(ui: &mut egui::Ui, rect: egui::Rect, active: bool) {
     } else {
         Color32::from_rgb(105, 105, 105)
     };
-    let baseline = egui::pos2(rect.left() + TERMINAL_SIDE_PADDING, rect.center().y);
+    let baseline = egui::pos2(rect.left() + side_padding, rect.center().y);
     ui.painter().text(
         baseline,
         egui::Align2::LEFT_CENTER,
@@ -3499,6 +3622,109 @@ fn paint_terminal_footer(ui: &mut egui::Ui, rect: egui::Rect, active: bool) {
         FontId::new(11.0, FontFamily::Monospace),
         key_color,
     );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_recent_command_suggestion(
+    ui: &mut egui::Ui,
+    pane_id: PaneId,
+    content_rect: egui::Rect,
+    grid_origin: egui::Pos2,
+    cursor_row: u16,
+    cursor_column: u16,
+    cell_width: f32,
+    cell_height: f32,
+    font_size: f32,
+    command: &str,
+    active: bool,
+) -> bool {
+    let left = grid_origin.x + f32::from(cursor_column) * cell_width + 8.0;
+    let available = (content_rect.right() - left - 8.0).max(0.0);
+    if available < 96.0 {
+        return false;
+    }
+    let max_command_chars =
+        usize::from(cells_for_pixels((available - 76.0).max(0.0), cell_width).max(4));
+    let command = compact_command_suggestion(command, max_command_chars);
+    let font = FontId::new(font_size, FontFamily::Monospace);
+    let run_width = ui.fonts_mut(|fonts| {
+        fonts
+            .layout_no_wrap("Run ".to_owned(), font.clone(), text_secondary())
+            .size()
+            .x
+    });
+    let command_width = ui.fonts_mut(|fonts| {
+        fonts
+            .layout_no_wrap(command.clone(), font.clone(), text_primary())
+            .size()
+            .x
+    });
+    let key_width = 26.0;
+    let gap = 8.0;
+    let width = (run_width + command_width + gap + key_width).min(available);
+    let center_y = grid_origin.y + (f32::from(cursor_row) + 0.5) * cell_height;
+    let rect = egui::Rect::from_center_size(
+        egui::pos2(left + width / 2.0, center_y),
+        Vec2::new(width, cell_height.max(22.0)),
+    )
+    .intersect(content_rect);
+    let response = ui.interact(
+        rect,
+        egui::Id::new(("recent-command-suggestion", pane_id)),
+        Sense::click(),
+    );
+    let painter = ui.painter().with_clip_rect(content_rect);
+    let muted = if active {
+        Color32::from_rgb(118, 118, 118)
+    } else {
+        Color32::from_rgb(78, 78, 78)
+    };
+    painter.text(
+        egui::pos2(rect.left(), rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        "Run ",
+        font.clone(),
+        muted,
+    );
+    painter.text(
+        egui::pos2(rect.left() + run_width, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        command,
+        font,
+        if response.hovered() && active {
+            Color32::from_rgb(205, 205, 205)
+        } else {
+            Color32::from_rgb(145, 145, 145)
+        },
+    );
+    let key_rect = egui::Rect::from_center_size(
+        egui::pos2(rect.right() - key_width / 2.0, rect.center().y),
+        Vec2::new(key_width, 19.0),
+    );
+    painter.rect(
+        key_rect,
+        4.0,
+        Color32::from_rgb(13, 13, 13),
+        Stroke::new(1.0, Color32::from_rgb(67, 67, 67)),
+        egui::StrokeKind::Inside,
+    );
+    painter.text(
+        key_rect.center(),
+        egui::Align2::CENTER_CENTER,
+        "→",
+        FontId::new(12.0, FontFamily::Monospace),
+        muted,
+    );
+    response.clicked()
+}
+
+fn compact_command_suggestion(command: &str, max_chars: usize) -> String {
+    let command = command.split_whitespace().collect::<Vec<_>>().join(" ");
+    if command.chars().count() <= max_chars {
+        return command;
+    }
+    let keep = max_chars.saturating_sub(1);
+    format!("{}…", command.chars().take(keep).collect::<String>())
 }
 
 #[allow(
@@ -3512,6 +3738,7 @@ fn paint_command_header(
     cwd: &Path,
     git: Option<&GitStatus>,
     active: bool,
+    side_padding: f32,
 ) {
     const CHIP_HEIGHT: f32 = 22.0;
     const GAP: f32 = 7.0;
@@ -3524,8 +3751,8 @@ fn paint_command_header(
     clip.hline(header_rect.x_range(), header_rect.bottom(), separator);
 
     let center_y = header_rect.center().y;
-    let left = header_rect.left() + TERMINAL_SIDE_PADDING;
-    let right = header_rect.right() - TERMINAL_SIDE_PADDING;
+    let left = header_rect.left() + side_padding;
+    let right = header_rect.right() - side_padding;
     let available = (right - left).max(0.0);
     let max_path_width = (available * if git.is_some() { 0.48 } else { 0.72 })
         .clamp(96.0, 360.0)
@@ -3769,6 +3996,7 @@ fn terminal_layout_job(
     parser: &vt100::Parser,
     selection: Option<TerminalSelection>,
     cell_height: f32,
+    font_size: f32,
 ) -> LayoutJob {
     let screen = parser.screen();
     let (rows, columns) = screen.size();
@@ -3816,7 +4044,7 @@ fn terminal_layout_job(
                 foreground = foreground.gamma_multiply(0.65);
             }
             let format = TextFormat {
-                font_id: FontId::new(TERMINAL_FONT_SIZE, FontFamily::Monospace),
+                font_id: FontId::new(font_size, FontFamily::Monospace),
                 line_height: Some(cell_height),
                 color: foreground,
                 background,
@@ -3841,7 +4069,7 @@ fn terminal_layout_job(
                 "\n",
                 0.0,
                 TextFormat {
-                    font_id: FontId::new(TERMINAL_FONT_SIZE, FontFamily::Monospace),
+                    font_id: FontId::new(font_size, FontFamily::Monospace),
                     line_height: Some(cell_height),
                     color: Color32::WHITE,
                     ..Default::default()
@@ -3870,11 +4098,23 @@ fn terminal_divider_rows(screen: &vt100::Screen) -> Vec<u16> {
 
 fn terminal_application_mode(screen: &vt100::Screen) -> bool {
     screen.alternate_screen()
-        || screen.hide_cursor()
         || screen.application_cursor()
         || screen.application_keypad()
         || screen.bracketed_paste()
         || screen.mouse_protocol_mode() != vt100::MouseProtocolMode::None
+}
+
+fn terminal_command_header_top(
+    grid_origin_y: f32,
+    divider_row: u16,
+    cell_height: f32,
+    bottom_padding: f32,
+    pixels_per_point: f32,
+) -> f32 {
+    snap_to_pixel(
+        grid_origin_y + f32::from(divider_row.saturating_add(1)) * cell_height - bottom_padding,
+        pixels_per_point,
+    )
 }
 
 fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
@@ -3929,6 +4169,7 @@ fn forward_terminal_input(
     context: &egui::Context,
     pane: &TerminalPane,
     requests: &Sender<ClientRequest>,
+    recent_command: Option<&str>,
 ) {
     let events = context.input(|input| input.events.clone());
     let has_paste = events
@@ -3976,7 +4217,16 @@ fn forward_terminal_input(
                 {
                     continue;
                 }
-                if modifiers.ctrl && !modifiers.shift && key == Key::C && pane.selection.is_some() {
+                if key == Key::ArrowRight
+                    && modifiers.is_none()
+                    && let Some(command) = recent_command
+                {
+                    pane.send(requests, command.as_bytes().to_vec());
+                } else if modifiers.ctrl
+                    && !modifiers.shift
+                    && key == Key::C
+                    && pane.selection.is_some()
+                {
                     if let Some(text) = pane.selected_text() {
                         context.copy_text(text);
                     }
@@ -4296,8 +4546,8 @@ fn terminal_cursor_rect(
     cell_height: f32,
     pixels_per_point: f32,
 ) -> egui::Rect {
-    let width = 2.0_f32.min(cell_width);
-    let height = (cell_height - 4.0).max(2.0).min(cell_height);
+    let width = cell_width.max(2.0);
+    let height = (cell_height - 2.0).max(2.0).min(cell_height);
     let center = egui::pos2(
         snap_to_pixel(
             grid_origin.x + (f32::from(column) + 0.5) * cell_width,
@@ -4306,6 +4556,44 @@ fn terminal_cursor_rect(
         grid_origin.y + (f32::from(row) + 0.5) * cell_height,
     );
     egui::Rect::from_center_size(center, Vec2::new(width, height))
+}
+
+fn terminal_cursor_animation(elapsed: Duration) -> (f32, Duration) {
+    if elapsed < TERMINAL_CURSOR_STEADY_DURATION {
+        return (1.0, TERMINAL_CURSOR_STEADY_DURATION.saturating_sub(elapsed));
+    }
+
+    let phase = elapsed
+        .saturating_sub(TERMINAL_CURSOR_STEADY_DURATION)
+        .as_secs_f32()
+        % TERMINAL_CURSOR_BLINK_PERIOD.as_secs_f32();
+    let period = TERMINAL_CURSOR_BLINK_PERIOD.as_secs_f32();
+    let fade_out_start = period * 0.40;
+    let fade_out_end = period * 0.54;
+    let fade_in_start = period * 0.78;
+
+    if phase < fade_out_start {
+        (
+            1.0,
+            Duration::from_secs_f32(fade_out_start - phase).max(TERMINAL_CURSOR_FRAME_INTERVAL),
+        )
+    } else if phase < fade_out_end {
+        let progress = (phase - fade_out_start) / (fade_out_end - fade_out_start);
+        (1.0 - smoothstep(progress), TERMINAL_CURSOR_FRAME_INTERVAL)
+    } else if phase < fade_in_start {
+        (
+            0.0,
+            Duration::from_secs_f32(fade_in_start - phase).max(TERMINAL_CURSOR_FRAME_INTERVAL),
+        )
+    } else {
+        let progress = (phase - fade_in_start) / (period - fade_in_start);
+        (smoothstep(progress), TERMINAL_CURSOR_FRAME_INTERVAL)
+    }
+}
+
+fn smoothstep(progress: f32) -> f32 {
+    let progress = progress.clamp(0.0, 1.0);
+    progress * progress * (3.0 - 2.0 * progress)
 }
 
 fn terminal_limit_reached(terminal_count: usize) -> bool {
@@ -4619,7 +4907,46 @@ mod tests {
         let rect = terminal_cursor_rect(egui::pos2(10.0, 20.0), 2, 3, 8.0, 18.0, 1.0);
 
         assert_eq!(rect.center(), egui::pos2(38.0, 65.0));
-        assert_eq!(rect.size(), Vec2::new(2.0, 14.0));
+        assert_eq!(rect.size(), Vec2::new(8.0, 16.0));
+    }
+
+    #[test]
+    fn terminal_cursor_stays_solid_while_typing_then_blinks_smoothly() {
+        let (typing_opacity, _) = terminal_cursor_animation(TERMINAL_CURSOR_STEADY_DURATION / 2);
+        let (idle_opacity, _) = terminal_cursor_animation(
+            TERMINAL_CURSOR_STEADY_DURATION + TERMINAL_CURSOR_BLINK_PERIOD * 13 / 20,
+        );
+        let (fade_opacity, repaint_after) = terminal_cursor_animation(
+            TERMINAL_CURSOR_STEADY_DURATION + TERMINAL_CURSOR_BLINK_PERIOD * 47 / 100,
+        );
+
+        assert!((typing_opacity - 1.0).abs() < f32::EPSILON);
+        assert!(idle_opacity.abs() < f32::EPSILON);
+        assert!((0.0..1.0).contains(&fade_opacity));
+        assert_eq!(repaint_after, TERMINAL_CURSOR_FRAME_INTERVAL);
+    }
+
+    #[test]
+    fn terminal_sizing_grows_with_available_pane_space() {
+        let compact = terminal_sizing(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            Vec2::new(480.0, 300.0),
+        ));
+        let comfortable = terminal_sizing(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            Vec2::new(720.0, 480.0),
+        ));
+        let spacious = terminal_sizing(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            Vec2::new(1100.0, 700.0),
+        ));
+
+        assert!(compact.font_size < comfortable.font_size);
+        assert!(comfortable.font_size < spacious.font_size);
+        assert!(compact.side_padding < comfortable.side_padding);
+        assert!(comfortable.side_padding < spacious.side_padding);
+        assert!(compact.bottom_padding < spacious.bottom_padding);
+        assert!(compact.footer_height < spacious.footer_height);
     }
 
     #[test]
@@ -4682,12 +5009,28 @@ mod tests {
     }
 
     #[test]
+    fn bottom_command_input_is_centered_between_header_and_footer() {
+        let grid_origin_y = 100.0;
+        let cell_height = 20.0;
+        let bottom_padding = 16.0;
+        let header_top =
+            terminal_command_header_top(grid_origin_y, 0, cell_height, bottom_padding, 1.0);
+        let header_bottom = header_top + 2.0 * cell_height;
+        let input_center = grid_origin_y + 3.5 * cell_height;
+        let footer_top = grid_origin_y + 4.0 * cell_height + bottom_padding;
+
+        assert!((input_center - f32::midpoint(header_bottom, footer_top)).abs() < f32::EPSILON);
+    }
+
+    #[test]
     fn tui_modes_disable_shell_block_chrome() {
         let mut parser = vt100::Parser::new(12, 80, 100);
         assert!(!terminal_application_mode(parser.screen()));
 
+        // Line editors briefly hide the cursor while redrawing on every keystroke. Cursor
+        // visibility alone must not move a bottom-anchored shell prompt to the top of the pane.
         parser.process(b"\x1b[?25l");
-        assert!(terminal_application_mode(parser.screen()));
+        assert!(!terminal_application_mode(parser.screen()));
 
         parser.process(b"\x1b[?25h\x1b[?2004h");
         assert!(!parser.screen().alternate_screen());
@@ -4698,6 +5041,23 @@ mod tests {
 
         parser.process(b"\x1b[?1000l");
         assert!(!terminal_application_mode(parser.screen()));
+    }
+
+    #[test]
+    fn shell_prompt_stays_bottom_anchored_during_cursor_hidden_redraw() {
+        let mut parser = vt100::Parser::new(12, 80, 100);
+        parser
+            .process(format!("\x1b[8m{TERMINAL_DIVIDER_MARKER}\x1b[0m\r\nPS> command").as_bytes());
+        let visual_end_before = terminal_visual_end_row(parser.screen());
+
+        parser.process(b"\x1b[?25l\r\x1b[2KPS> commandx");
+
+        assert!(!terminal_application_mode(parser.screen()));
+        assert_eq!(
+            terminal_visual_end_row(parser.screen()),
+            visual_end_before,
+            "the redraw must not change the bottom-anchored grid extent"
+        );
     }
 
     #[test]
@@ -4741,9 +5101,40 @@ mod tests {
     fn terminal_layout_coalesces_cells_with_identical_formatting() {
         let mut parser = vt100::Parser::new(12, 80, 100);
         parser.process(b"one uniformly formatted line");
-        let job = terminal_layout_job(&parser, None, 18.0);
+        let job = terminal_layout_job(&parser, None, 18.0, 14.0);
 
         assert!(job.sections.len() < 30, "sections: {}", job.sections.len());
+    }
+
+    #[test]
+    fn recent_command_osc_is_captured_without_reaching_the_terminal_grid() {
+        use base64::Engine;
+        let metadata = PaneSnapshot {
+            id: PaneId::new(),
+            workspace_id: ade_core::WorkspaceId::new(),
+            cwd: PathBuf::from("."),
+            process_label: "test".to_owned(),
+            cols: 80,
+            rows: 12,
+            status: SessionStatus::Running,
+        };
+        let mut pane = TerminalPane::new(&metadata);
+        let command = "cargo test --workspace";
+        let encoded = base64::engine::general_purpose::STANDARD.encode(command);
+
+        pane.process_output(format!("\x1b]6973;{encoded}\x07PS> ").as_bytes());
+
+        assert_eq!(pane.recent_command.as_deref(), Some(command));
+        assert_eq!(pane.parser.screen().contents(), "PS> ");
+    }
+
+    #[test]
+    fn long_recent_commands_are_compacted_for_the_suggestion_row() {
+        assert_eq!(
+            compact_command_suggestion("  cargo   test --workspace  ", 15),
+            "cargo test --w…"
+        );
+        assert_eq!(compact_command_suggestion("git status", 20), "git status");
     }
 
     #[test]
@@ -4921,7 +5312,7 @@ mod tests {
     }
 
     #[test]
-    fn pointer_mapping_accounts_for_bottom_anchored_grid() {
+    fn pointer_mapping_accounts_for_an_offset_grid_origin() {
         let content_rect =
             egui::Rect::from_min_max(egui::pos2(10.0, 10.0), egui::pos2(210.0, 210.0));
         let grid_origin = egui::pos2(10.0, 150.0);

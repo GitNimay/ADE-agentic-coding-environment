@@ -49,6 +49,23 @@ function global:prompt {
     $location = (Get-Location).ProviderPath
     $uri = ([uri]$location).AbsoluteUri
     [Console]::Write("$global:__ade_escape]7;$uri$([char]7)")
+    try {
+        $latest = $null
+        $liveHistory = (Get-History -Count 1).CommandLine
+        if (-not [string]::IsNullOrWhiteSpace($liveHistory) -and $liveHistory -notmatch '__ade_') {
+            $latest = $liveHistory
+        } elseif (Get-Module -Name PSReadLine) {
+            $historyPath = (Get-PSReadLineOption).HistorySavePath
+            $latest = Get-Content -LiteralPath $historyPath -Tail 20 -ErrorAction SilentlyContinue |
+                Where-Object { $_ -notmatch '__ade_' } |
+                Select-Object -Last 1
+        }
+        if (-not [string]::IsNullOrWhiteSpace($latest)) {
+            $historyBytes = [Text.Encoding]::UTF8.GetBytes($latest.Trim())
+            $historyBase64 = [Convert]::ToBase64String($historyBytes)
+            [Console]::Write("$global:__ade_escape]6973;$historyBase64$([char]7)")
+        }
+    } catch {}
     [Console]::Write("$global:__ade_escape[8m__ADE_BLOCK_DIVIDER__$global:__ade_escape[0m`r`n`r`n`r`n")
     return "$global:__ade_escape[38;2;126;189;255m❯$global:__ade_escape[0m "
 }
