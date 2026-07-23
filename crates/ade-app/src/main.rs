@@ -63,6 +63,10 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const DETACHED_PROCESS: u32 = 0x0000_0008;
 const RELEASE_REPOSITORY_OWNER: &str = "GitNimay";
 const RELEASE_REPOSITORY_NAME: &str = "ADE-agentic-coding-environment";
+// Keep the release asset name different from the name self_update extracts to. For a plain
+// executable, identical names make the library open its download as the extraction destination
+// and truncate it before replacement.
+const RELEASE_ASSET_NAME: &str = "windows-x64-termy.exe";
 
 enum UpdateEvent {
     CheckComplete(Option<String>),
@@ -97,7 +101,7 @@ fn configured_updater(
         .repo_owner(RELEASE_REPOSITORY_OWNER)
         .repo_name(RELEASE_REPOSITORY_NAME)
         .bin_name("termy")
-        .identifier("termy.exe")
+        .identifier(RELEASE_ASSET_NAME)
         .current_version(current_version)
         .no_confirm(true)
         .show_output(false)
@@ -4900,6 +4904,36 @@ mod tests {
             deferred_update_delay(last_activity, last_activity + UPDATE_IDLE_DURATION),
             None
         );
+    }
+
+    #[test]
+    fn updater_stages_plain_executable_without_truncating_it() {
+        assert_ne!(RELEASE_ASSET_NAME, "termy.exe");
+        // Older official clients identify assets by this substring. Keeping it in the renamed
+        // asset lets those clients safely move to the first fixed release too.
+        assert!(RELEASE_ASSET_NAME.contains("termy.exe"));
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "termy-updater-test-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let download = directory.join(RELEASE_ASSET_NAME);
+        std::fs::write(&download, b"MZ updater regression fixture").unwrap();
+
+        self_update::Extract::from_source(&download)
+            .extract_file(&directory, "termy.exe")
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read(directory.join("termy.exe")).unwrap(),
+            b"MZ updater regression fixture"
+        );
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

@@ -10,7 +10,7 @@ the window is closed and stores workspace state in SQLite.
 ## Install
 
 Download
-[`termy.exe`](https://github.com/GitNimay/ADE-agentic-coding-environment/releases/latest/download/termy.exe)
+[`windows-x64-termy.exe`](https://github.com/GitNimay/ADE-agentic-coding-environment/releases/latest/download/windows-x64-termy.exe)
 to a permanent folder and run it. Windows 11 x64 is required.
 
 The standalone build is free and currently unsigned, so Windows SmartScreen may show an unknown

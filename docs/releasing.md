@@ -1,14 +1,17 @@
 # Releasing Termy
 
 Termy is distributed as one unsigned Windows executable through GitHub Releases. Users download
-`termy.exe` directly; no ZIP archive is published. Windows SmartScreen may show an unknown-publisher
-warning because the executable does not have a commercial Authenticode certificate.
+`windows-x64-termy.exe` directly; no ZIP archive is published. The release asset deliberately keeps
+the `termy.exe` suffix used by older updater clients while differing from the updater's extraction
+name. This prevents a plain executable download from being truncated when staged for replacement.
+Windows SmartScreen may show an unknown-publisher warning because the executable does not have a
+commercial Authenticode certificate.
 
 GitHub Actions generates a Sigstore-backed build-provenance attestation for each executable. A
 download can be checked with:
 
 ```powershell
-gh attestation verify .\termy.exe `
+gh attestation verify .\windows-x64-termy.exe `
   --repo GitNimay/ADE-agentic-coding-environment
 ```
 
@@ -20,9 +23,9 @@ test suite. Only after that push's CI run succeeds, `release.yml`:
 1. checks out the exact verified commit;
 2. derives a unique semantic version from the workspace major/minor version and CI run number;
 3. embeds that release version and builds `ade-app` with the locked dependency graph;
-4. renames the output to `termy.exe`;
+4. renames the output to `windows-x64-termy.exe` and validates its x64 PE headers;
 5. records build provenance; and
-6. creates the latest GitHub Release containing only `termy.exe`.
+6. creates the latest GitHub Release containing only `windows-x64-termy.exe`.
 
 Monitor the runs with:
 

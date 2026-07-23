@@ -54,18 +54,42 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
-          Copy-Item target/release/ade-app.exe dist/termy.exe
+          Copy-Item target/release/ade-app.exe dist/windows-x64-termy.exe
+
+      - name: Validate Windows executable
+        shell: pwsh
+        run: |
+          $path = Resolve-Path dist/windows-x64-termy.exe
+          $bytes = [System.IO.File]::ReadAllBytes($path)
+          if ($bytes.Length -lt 1024 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {
+            throw "Release artifact is not a valid PE executable"
+          }
+          $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
+          if (
+            $peOffset -lt 0 -or
+            $peOffset + 6 -gt $bytes.Length -or
+            $bytes[$peOffset] -ne 0x50 -or
+            $bytes[$peOffset + 1] -ne 0x45 -or
+            $bytes[$peOffset + 2] -ne 0 -or
+            $bytes[$peOffset + 3] -ne 0
+          ) {
+            throw "Release artifact has an invalid PE header"
+          }
+          $machine = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
+          if ($machine -ne 0x8664) {
+            throw ("Release artifact is not x64 (machine 0x{0:X4})" -f $machine)
+          }
 
       - name: Attest build provenance
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
-          subject-path: dist/termy.exe
+          subject-path: dist/windows-x64-termy.exe
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: termy-ci-${{ github.event.workflow_run.run_number }}-windows-x64
-          path: dist/termy.exe
+          path: dist/windows-x64-termy.exe
           if-no-files-found: error
           retention-days: 14
 
@@ -76,9 +100,9 @@ jobs:
         run: |
           gh release view $env:TERMY_RELEASE_TAG *> $null
           if ($LASTEXITCODE -eq 0) {
-            gh release upload $env:TERMY_RELEASE_TAG dist/termy.exe --clobber
+            gh release upload $env:TERMY_RELEASE_TAG dist/windows-x64-termy.exe --clobber
           } else {
-            gh release create $env:TERMY_RELEASE_TAG dist/termy.exe `
+            gh release create $env:TERMY_RELEASE_TAG dist/windows-x64-termy.exe `
               --target "${{ github.event.workflow_run.head_sha }}" `
               --generate-notes `
               --latest `
