@@ -23,13 +23,16 @@ pub enum SplitAxis {
 pub enum SplitDirection {
     Right,
     Down,
+    Left,
+    Up,
 }
 
 impl SplitDirection {
-    const fn axis(self) -> SplitAxis {
+    #[must_use]
+    pub const fn axis(self) -> SplitAxis {
         match self {
-            Self::Right => SplitAxis::Columns,
-            Self::Down => SplitAxis::Rows,
+            Self::Right | Self::Left => SplitAxis::Columns,
+            Self::Down | Self::Up => SplitAxis::Rows,
         }
     }
 }
@@ -207,6 +210,88 @@ impl LayoutNode {
         Self::remove_from_split(first, target) || Self::remove_from_split(second, target)
     }
 
+    /// Returns the pane adjacent to `current` in the given `direction`, if one exists.
+    ///
+    /// Left/Right navigation follows `Columns` splits; Up/Down follows `Rows` splits.
+    /// The method walks from `current` toward the root looking for the nearest ancestor
+    /// split with a matching axis, then returns the sibling's first leaf pane.
+    #[must_use]
+    pub fn find_adjacent(&self, current: PaneId, direction: SplitDirection) -> Option<PaneId> {
+        let target_axis = direction.axis();
+        let forward = matches!(direction, SplitDirection::Right | SplitDirection::Down);
+        let mut path = Vec::new();
+        self.collect_path(current, &mut path)?;
+
+        while let Some(child_index) = path.pop() {
+            let parent = self.node_at(&path)?;
+
+            if let Self::Split { axis, .. } = parent
+                && *axis == target_axis
+            {
+                let dominated = child_index == 0;
+                if forward && !dominated {
+                    return None;
+                }
+                if !forward && dominated {
+                    continue;
+                }
+                let mut current_path = path.clone();
+                current_path.push(child_index);
+                let current_subtree = self.node_at(&current_path)?;
+                let current_panes = current_subtree.pane_ids();
+                let position = current_panes.iter().position(|&id| id == current)?;
+
+                let sibling_index = 1 - child_index;
+                let mut sibling_path = path.clone();
+                sibling_path.push(sibling_index);
+                let sibling_subtree = self.node_at(&sibling_path)?;
+                let sibling_panes = sibling_subtree.pane_ids();
+                let target_index = position.min(sibling_panes.len().saturating_sub(1));
+                return sibling_panes.get(target_index).copied();
+            }
+        }
+
+        None
+    }
+
+    fn collect_path(&self, target: PaneId, path: &mut Vec<usize>) -> Option<()> {
+        match self {
+            Self::Empty => None,
+            Self::Pane { pane_id } => {
+                if *pane_id == target {
+                    Some(())
+                } else {
+                    None
+                }
+            }
+            Self::Split { first, second, .. } => {
+                path.push(0);
+                if first.collect_path(target, path).is_some() {
+                    return Some(());
+                }
+                path.pop();
+                path.push(1);
+                if second.collect_path(target, path).is_some() {
+                    return Some(());
+                }
+                path.pop();
+                None
+            }
+        }
+    }
+
+    fn node_at(&self, path: &[usize]) -> Option<&Self> {
+        let mut node = self;
+        for &branch in path {
+            match (node, branch) {
+                (Self::Split { first, .. }, 0) => node = first,
+                (Self::Split { second, .. }, 1) => node = second,
+                _ => return None,
+            }
+        }
+        Some(node)
+    }
+
     fn validate_inner(&self, panes: &mut HashSet<PaneId>) -> Result<(), LayoutError> {
         match self {
             Self::Empty => Ok(()),
@@ -285,6 +370,111 @@ mod tests {
         layout.close(down).unwrap();
         assert_eq!(layout.pane_ids(), vec![first, right]);
         layout.validate().unwrap();
+    }
+
+    #[test]
+    fn find_adjacent_left_right() {
+        let a = PaneId::new();
+        let b = PaneId::new();
+        let layout = LayoutNode::Split {
+            axis: SplitAxis::Columns,
+            ratio: 0.5,
+            first: Box::new(LayoutNode::pane(a)),
+            second: Box::new(LayoutNode::pane(b)),
+        };
+
+        assert_eq!(layout.find_adjacent(a, SplitDirection::Right), Some(b));
+        assert_eq!(layout.find_adjacent(b, SplitDirection::Left), Some(a));
+        assert_eq!(layout.find_adjacent(a, SplitDirection::Left), None);
+        assert_eq!(layout.find_adjacent(b, SplitDirection::Right), None);
+    }
+
+    #[test]
+    fn find_adjacent_up_down() {
+        let a = PaneId::new();
+        let b = PaneId::new();
+        let layout = LayoutNode::Split {
+            axis: SplitAxis::Rows,
+            ratio: 0.5,
+            first: Box::new(LayoutNode::pane(a)),
+            second: Box::new(LayoutNode::pane(b)),
+        };
+
+        assert_eq!(layout.find_adjacent(a, SplitDirection::Down), Some(b));
+        assert_eq!(layout.find_adjacent(b, SplitDirection::Up), Some(a));
+        assert_eq!(layout.find_adjacent(a, SplitDirection::Up), None);
+        assert_eq!(layout.find_adjacent(b, SplitDirection::Down), None);
+    }
+
+    #[test]
+    fn find_adjacent_cross_axis_returns_none() {
+        let a = PaneId::new();
+        let b = PaneId::new();
+        let layout = LayoutNode::Split {
+            axis: SplitAxis::Columns,
+            ratio: 0.5,
+            first: Box::new(LayoutNode::pane(a)),
+            second: Box::new(LayoutNode::pane(b)),
+        };
+
+        assert_eq!(layout.find_adjacent(a, SplitDirection::Up), None);
+        assert_eq!(layout.find_adjacent(a, SplitDirection::Down), None);
+    }
+
+    #[test]
+    fn find_adjacent_three_column_row() {
+        let a = PaneId::new();
+        let b = PaneId::new();
+        let c = PaneId::new();
+        let layout = LayoutNode::Split {
+            axis: SplitAxis::Columns,
+            ratio: 1.0 / 3.0,
+            first: Box::new(LayoutNode::pane(a)),
+            second: Box::new(LayoutNode::Split {
+                axis: SplitAxis::Columns,
+                ratio: 0.5,
+                first: Box::new(LayoutNode::pane(b)),
+                second: Box::new(LayoutNode::pane(c)),
+            }),
+        };
+
+        assert_eq!(layout.find_adjacent(a, SplitDirection::Right), Some(b));
+        assert_eq!(layout.find_adjacent(b, SplitDirection::Left), Some(a));
+        assert_eq!(layout.find_adjacent(b, SplitDirection::Right), Some(c));
+        assert_eq!(layout.find_adjacent(c, SplitDirection::Left), Some(b));
+    }
+
+    #[test]
+    fn find_adjacent_2x2_grid() {
+        let tl = PaneId::new();
+        let tr = PaneId::new();
+        let bl = PaneId::new();
+        let br = PaneId::new();
+        let layout = LayoutNode::Split {
+            axis: SplitAxis::Rows,
+            ratio: 0.5,
+            first: Box::new(LayoutNode::Split {
+                axis: SplitAxis::Columns,
+                ratio: 0.5,
+                first: Box::new(LayoutNode::pane(tl)),
+                second: Box::new(LayoutNode::pane(tr)),
+            }),
+            second: Box::new(LayoutNode::Split {
+                axis: SplitAxis::Columns,
+                ratio: 0.5,
+                first: Box::new(LayoutNode::pane(bl)),
+                second: Box::new(LayoutNode::pane(br)),
+            }),
+        };
+
+        assert_eq!(layout.find_adjacent(tl, SplitDirection::Right), Some(tr));
+        assert_eq!(layout.find_adjacent(tl, SplitDirection::Down), Some(bl));
+        assert_eq!(layout.find_adjacent(br, SplitDirection::Left), Some(bl));
+        assert_eq!(layout.find_adjacent(br, SplitDirection::Up), Some(tr));
+        assert_eq!(layout.find_adjacent(tr, SplitDirection::Left), Some(tl));
+        assert_eq!(layout.find_adjacent(tr, SplitDirection::Down), Some(br));
+        assert_eq!(layout.find_adjacent(bl, SplitDirection::Right), Some(br));
+        assert_eq!(layout.find_adjacent(bl, SplitDirection::Up), Some(tl));
     }
 
     #[test]

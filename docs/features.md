@@ -254,10 +254,12 @@ content.
 
 ### 4.4 Paste and bracketed paste
 
-**Ctrl+Shift+V** reads plain text from the Windows clipboard. Before it is sent, Windows CRLF line
-endings are normalized to LF and null characters are removed. If the active terminal has enabled
-bracketed-paste mode, the app wraps the payload in the standard `ESC[200~` and `ESC[201~`
-sequences so compatible shells and programs can treat it as pasted data.
+**Ctrl+Shift+V** reads from the Windows clipboard. Plain text is normalized by converting Windows
+CRLF line endings to LF and removing null characters before it is sent. Clipboard images are saved
+as PNG files under `%LOCALAPPDATA%\ADE\clipboard-images`, then the quoted absolute image path is
+pasted into the active terminal for CLI apps that accept image/file paths. If the active terminal
+has enabled bracketed-paste mode, the app wraps the payload in the standard `ESC[200~` and
+`ESC[201~` sequences so compatible shells and programs can treat it as pasted data.
 
 Paste events delivered directly by the UI follow the same normalization and bracketed-paste logic.
 Clipboard access failures appear in the in-app error dialog.

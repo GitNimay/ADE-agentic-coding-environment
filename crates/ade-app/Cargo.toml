@@ -10,8 +10,10 @@ ade-core.workspace = true
 ade-daemon.workspace = true
 ade-protocol.workspace = true
 arboard.workspace = true
+base64.workspace = true
 crossbeam-channel.workspace = true
 eframe.workspace = true
+image.workspace = true
 rfd.workspace = true
 self_update = { version = "0.44.0", default-features = false, features = ["ureq", "rustls"] }
 vt100.workspace = true

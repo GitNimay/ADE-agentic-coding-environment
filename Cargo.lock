@@ -119,14 +119,16 @@ dependencies = [
 
 [[package]]
 name = "ade-app"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ade-core",
  "ade-daemon",
  "ade-protocol",
  "arboard",
+ "base64",
  "crossbeam-channel",
  "eframe",
+ "image",
  "rfd",
  "self_update",
  "vt100",
@@ -135,7 +137,7 @@ dependencies = [
 
 [[package]]
 name = "ade-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ade-protocol",
  "serde_json",
@@ -143,7 +145,7 @@ dependencies = [
 
 [[package]]
 name = "ade-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -153,7 +155,7 @@ dependencies = [
 
 [[package]]
 name = "ade-daemon"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ade-core",
  "ade-protocol",
@@ -167,7 +169,7 @@ dependencies = [
 
 [[package]]
 name = "ade-protocol"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ade-core",
  "serde",
@@ -177,7 +179,7 @@ dependencies = [
 
 [[package]]
 name = "ade-pty"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "thiserror 2.0.19",
  "windows",
@@ -185,7 +187,7 @@ dependencies = [
 
 [[package]]
 name = "ade-storage"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ade-core",
  "ade-protocol",

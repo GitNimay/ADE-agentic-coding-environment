@@ -11,7 +11,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT OR Apache-2.0"
@@ -23,7 +23,9 @@ ade-protocol = { path = "crates/ade-protocol" }
 ade-pty = { path = "crates/ade-pty" }
 ade-storage = { path = "crates/ade-storage" }
 arboard = "3.6.1"
+base64 = "0.22.1"
 crossbeam-channel = "0.5.16"
+image = { version = "0.25", default-features = false, features = ["png"] }
 eframe = { version = "0.35.0", default-features = false, features = [
     "accesskit",
     "default_fonts",

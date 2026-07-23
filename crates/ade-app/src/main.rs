@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ade_core::{
     LayoutNode, MAX_TERMINALS_PER_WORKSPACE, PaneId, SessionStatus, SplitAxis, SplitDirection,
@@ -256,6 +256,102 @@ fn diagnostic_log(message: &str) {
     }
 }
 
+fn clipboard_images_dir() -> Option<PathBuf> {
+    let local_app_data = std::env::var_os("LOCALAPPDATA")?;
+    Some(
+        PathBuf::from(local_app_data)
+            .join("ADE")
+            .join("clipboard-images"),
+    )
+}
+
+fn save_clipboard_image() -> Result<PathBuf, arboard::Error> {
+    let mut clipboard = arboard::Clipboard::new()?;
+    let image = clipboard.get_image()?;
+    let dir = clipboard_images_dir().ok_or(arboard::Error::ConversionFailure)?;
+    std::fs::create_dir_all(&dir).map_err(|_| arboard::Error::ConversionFailure)?;
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let timestamp = now.as_secs();
+    let nanos = now.subsec_nanos();
+    let filename = format!("clip_{timestamp}_{nanos}.png");
+    let path = dir.join(&filename);
+
+    let rgba = image.bytes;
+    let img = image::RgbaImage::from_raw(
+        image
+            .width
+            .try_into()
+            .map_err(|_| arboard::Error::ConversionFailure)?,
+        image
+            .height
+            .try_into()
+            .map_err(|_| arboard::Error::ConversionFailure)?,
+        rgba.into_owned(),
+    )
+    .ok_or(arboard::Error::ConversionFailure)?;
+    img.save(&path)
+        .map_err(|_| arboard::Error::ConversionFailure)?;
+
+    Ok(path)
+}
+
+fn quoted_terminal_path(path: &Path) -> String {
+    format!("\"{}\"", path.to_string_lossy())
+}
+
+fn try_image_paste(pane: &TerminalPane, requests: &Sender<ClientRequest>) -> bool {
+    if let Ok(path) = save_clipboard_image() {
+        pane.send(requests, pane.paste_bytes(&quoted_terminal_path(&path)));
+        true
+    } else {
+        false
+    }
+}
+
+fn try_clipboard_paste(pane: &TerminalPane, requests: &Sender<ClientRequest>) {
+    if try_image_paste(pane, requests) {
+        return;
+    }
+    if let Ok(mut clipboard) = arboard::Clipboard::new()
+        && let Ok(text) = clipboard.get_text()
+        && !text.is_empty()
+    {
+        pane.send(requests, pane.paste_bytes(&text));
+    }
+}
+
+fn cleanup_old_clipboard_images() {
+    let Some(dir) = clipboard_images_dir() else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH) else {
+        return;
+    };
+    let thirty_days = Duration::from_hours(720);
+    for entry in entries.flatten() {
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        let Ok(modified) = meta.modified() else {
+            continue;
+        };
+        let Ok(modified_since_epoch) = modified.duration_since(UNIX_EPOCH) else {
+            continue;
+        };
+        let age = now.saturating_sub(modified_since_epoch);
+        if age > thirty_days {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+#[allow(clippy::struct_excessive_bools)]
 struct AdeApp {
     workspaces: Vec<WorkspaceState>,
     active_workspace: usize,
@@ -270,6 +366,7 @@ struct AdeApp {
     sidebar_hover_started: Option<Instant>,
     sidebar_left_at: Option<Instant>,
     terminal_limit_popup: bool,
+    close_requested: bool,
     update_results: Receiver<UpdateNotice>,
     update_message: Option<String>,
 }
@@ -307,9 +404,11 @@ impl AdeApp {
             sidebar_hover_started: None,
             sidebar_left_at: None,
             terminal_limit_popup: false,
+            close_requested: false,
             update_results,
             update_message: None,
         };
+        cleanup_old_clipboard_images();
         app.send(ClientRequest::Attach);
         app
     }
@@ -322,6 +421,24 @@ impl AdeApp {
         if client.send(request).is_err() {
             self.error_message = Some("The termy background daemon disconnected".to_owned());
         }
+    }
+
+    fn has_active_sessions(&self) -> bool {
+        self.workspaces.iter().any(|ws| {
+            ws.panes.values().any(|pane| {
+                matches!(
+                    pane.status,
+                    SessionStatus::Starting | SessionStatus::Running
+                )
+            })
+        })
+    }
+
+    fn perform_shutdown(&self, ui: &egui::Ui) {
+        if let Some(client) = &self.client {
+            let _ = client.send(ClientRequest::Shutdown);
+        }
+        ui.send_viewport_cmd(egui::ViewportCommand::Close);
     }
 
     fn drain_update_results(&mut self) {
@@ -498,6 +615,7 @@ impl AdeApp {
         self.next_workspace_number = self.workspaces.len() + 1;
     }
 
+    #[allow(clippy::too_many_lines)]
     fn handle_shortcuts(&mut self, context: &egui::Context) {
         if context.input_mut(|input| {
             input.consume_shortcut(&shortcut(Key::P))
@@ -506,9 +624,6 @@ impl AdeApp {
             self.palette_open = true;
             self.palette_query.clear();
             self.palette_selection = 0;
-        }
-        if context.input_mut(|input| input.consume_shortcut(&shortcut(Key::N))) {
-            self.request_new_workspace(context);
         }
         if context.input_mut(|input| input.consume_shortcut(&shortcut(Key::D))) {
             self.split_active(SplitDirection::Right, context);
@@ -532,24 +647,6 @@ impl AdeApp {
         {
             context.copy_text(text);
         }
-        if context.input_mut(|input| input.consume_shortcut(&shortcut(Key::V))) {
-            match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_text()) {
-                Ok(text) => {
-                    if let Some(workspace) = self.workspaces.get(self.active_workspace) {
-                        let paste = workspace.model.active_pane_id.and_then(|pane_id| {
-                            workspace
-                                .panes
-                                .get(&pane_id)
-                                .map(|pane| (pane_id, pane.paste_bytes(&text)))
-                        });
-                        if let Some((pane_id, data)) = paste {
-                            self.send(ClientRequest::Input { pane_id, data });
-                        }
-                    }
-                }
-                Err(error) => self.error_message = Some(format!("Clipboard paste failed: {error}")),
-            }
-        }
         let previous_pane = context.input_mut(|input| {
             input.consume_shortcut(&KeyboardShortcut::new(
                 Modifiers::CTRL | Modifiers::ALT,
@@ -572,6 +669,42 @@ impl AdeApp {
             self.move_pane_focus(next_pane);
         }
         if context.input_mut(|input| {
+            input.consume_shortcut(&KeyboardShortcut::new(
+                Modifiers::CTRL | Modifiers::SHIFT,
+                Key::ArrowRight,
+            ))
+        }) && !self.workspaces.is_empty()
+        {
+            self.focus_terminal_direction(SplitDirection::Right);
+        }
+        if context.input_mut(|input| {
+            input.consume_shortcut(&KeyboardShortcut::new(
+                Modifiers::CTRL | Modifiers::SHIFT,
+                Key::ArrowLeft,
+            ))
+        }) && !self.workspaces.is_empty()
+        {
+            self.focus_terminal_direction(SplitDirection::Left);
+        }
+        if context.input_mut(|input| {
+            input.consume_shortcut(&KeyboardShortcut::new(
+                Modifiers::CTRL | Modifiers::SHIFT,
+                Key::ArrowDown,
+            ))
+        }) && !self.workspaces.is_empty()
+        {
+            self.focus_terminal_direction(SplitDirection::Down);
+        }
+        if context.input_mut(|input| {
+            input.consume_shortcut(&KeyboardShortcut::new(
+                Modifiers::CTRL | Modifiers::SHIFT,
+                Key::ArrowUp,
+            ))
+        }) && !self.workspaces.is_empty()
+        {
+            self.focus_terminal_direction(SplitDirection::Up);
+        }
+        if context.input_mut(|input| {
             input.consume_shortcut(&KeyboardShortcut::new(Modifiers::CTRL, Key::PageDown))
         }) && !self.workspaces.is_empty()
         {
@@ -582,6 +715,41 @@ impl AdeApp {
         }) && !self.workspaces.is_empty()
         {
             self.focus_relative_workspace(false);
+        }
+        // Consume plain Ctrl+letter shortcuts so they don't leak to the OS as
+        // accelerators (e.g. Ctrl+O opening the Windows Open File dialog).
+        // The terminal still receives the correct control character via encode_key.
+        for key in [
+            Key::A,
+            Key::B,
+            Key::C,
+            Key::D,
+            Key::E,
+            Key::F,
+            Key::G,
+            Key::H,
+            Key::I,
+            Key::J,
+            Key::K,
+            Key::L,
+            Key::M,
+            Key::N,
+            Key::O,
+            Key::P,
+            Key::Q,
+            Key::R,
+            Key::S,
+            Key::T,
+            Key::U,
+            Key::V,
+            Key::W,
+            Key::X,
+            Key::Y,
+            Key::Z,
+        ] {
+            context.input_mut(|input| {
+                input.consume_shortcut(&KeyboardShortcut::new(Modifiers::CTRL, key));
+            });
         }
     }
 
@@ -634,6 +802,19 @@ impl AdeApp {
         let pane_id = panes[next];
         workspace.model.active_pane_id = Some(pane_id);
         self.send(ClientRequest::FocusPane { pane_id });
+    }
+
+    fn focus_terminal_direction(&mut self, direction: SplitDirection) {
+        let Some(workspace) = self.workspaces.get_mut(self.active_workspace) else {
+            return;
+        };
+        let Some(current) = workspace.model.active_pane_id else {
+            return;
+        };
+        if let Some(adjacent) = workspace.model.layout.find_adjacent(current, direction) {
+            workspace.model.active_pane_id = Some(adjacent);
+            self.send(ClientRequest::FocusPane { pane_id: adjacent });
+        }
     }
 
     #[allow(clippy::too_many_lines)]
@@ -1053,6 +1234,18 @@ impl AdeApp {
             }
             PaletteCommand::NextWorkspace => self.focus_relative_workspace(true),
             PaletteCommand::PreviousWorkspace => self.focus_relative_workspace(false),
+            PaletteCommand::FocusTerminalLeft => {
+                self.focus_terminal_direction(SplitDirection::Left);
+            }
+            PaletteCommand::FocusTerminalRight => {
+                self.focus_terminal_direction(SplitDirection::Right);
+            }
+            PaletteCommand::FocusTerminalUp => {
+                self.focus_terminal_direction(SplitDirection::Up);
+            }
+            PaletteCommand::FocusTerminalDown => {
+                self.focus_terminal_direction(SplitDirection::Down);
+            }
         }
     }
 
@@ -1123,15 +1316,105 @@ impl AdeApp {
             self.terminal_limit_popup = false;
         }
     }
+
+    fn show_close_confirmation(&mut self, context: &egui::Context) {
+        if !self.close_requested {
+            return;
+        }
+        let modal_width = (context.content_rect().width() - 32.0).clamp(304.0, 400.0);
+        let modal_frame = egui::Frame::NONE
+            .fill(Color32::from_rgb(10, 10, 10))
+            .stroke(Stroke::new(1.0, border()))
+            .corner_radius(12.0)
+            .shadow(egui::epaint::Shadow {
+                offset: [0, 16],
+                blur: 40,
+                spread: 0,
+                color: Color32::from_black_alpha(210),
+            });
+        let response = egui::Modal::new(egui::Id::new("close-confirmation-popup"))
+            .backdrop_color(Color32::from_black_alpha(176))
+            .frame(modal_frame)
+            .show(context, |ui| {
+                ui.set_width(modal_width);
+                egui::Frame::NONE
+                    .inner_margin(egui::Margin {
+                        left: 24,
+                        right: 24,
+                        top: 22,
+                        bottom: 20,
+                    })
+                    .show(ui, |ui| {
+                        ui.label(
+                            RichText::new("Close Termy?")
+                                .font(FontId::proportional(16.0))
+                                .strong()
+                                .color(text_primary()),
+                        );
+                        ui.add_space(10.0);
+                        ui.label(
+                            RichText::new(
+                                "You have active terminal sessions running. Closing the app will terminate all sessions and their processes.",
+                            )
+                            .font(FontId::proportional(14.0))
+                            .color(text_secondary()),
+                        );
+                    });
+
+                ui.painter().hline(
+                    ui.max_rect().x_range(),
+                    ui.min_rect().bottom(),
+                    Stroke::new(1.0, border()),
+                );
+                egui::Frame::NONE
+                    .inner_margin(egui::Margin::symmetric(16, 12))
+                    .show(ui, |ui| {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let close = modal_danger_button(ui, "Close");
+                            close.request_focus();
+                            if close.clicked()
+                                || ui.input(|input| input.key_pressed(Key::Enter))
+                            {
+                                ui.close();
+                                self.perform_shutdown(ui);
+                            }
+                            let cancel = modal_primary_button(ui, "Cancel");
+                            if cancel.clicked()
+                                || ui.input(|input| input.key_pressed(Key::Escape))
+                            {
+                                ui.close();
+                            }
+                        });
+                    });
+            });
+        if response.should_close() {
+            self.close_requested = false;
+        }
+    }
 }
 
 impl eframe::App for AdeApp {
+    #[allow(clippy::too_many_lines)]
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let context = ui.ctx().clone();
         self.drain_update_results();
         self.drain_daemon_events(&context);
         self.handle_shortcuts(&context);
         self.finish_pane_closes(&context);
+
+        // Intercept close requests (from title bar button, Alt+F4, or OS)
+        let viewport_close = ui.input(|input| input.viewport().close_requested());
+        if viewport_close {
+            ui.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            if !self.close_requested {
+                if self.has_active_sessions() {
+                    self.close_requested = true;
+                } else {
+                    self.perform_shutdown(ui);
+                }
+            }
+        }
+
         let compact = ui.available_width() <= SIDEBAR_BREAKPOINT;
         if compact {
             window_title_bar(ui, &context);
@@ -1217,6 +1500,7 @@ impl eframe::App for AdeApp {
         }
         self.show_update_notice(&context);
         self.show_terminal_limit_popup(&context);
+        self.show_close_confirmation(&context);
         self.workspace_dialogs(&context);
         self.command_palette(&context);
         // Terminal output and user input request repaints immediately. A slow idle tick is enough
@@ -1368,6 +1652,10 @@ enum PaletteCommand {
     CloseWorkspace,
     NextWorkspace,
     PreviousWorkspace,
+    FocusTerminalLeft,
+    FocusTerminalRight,
+    FocusTerminalUp,
+    FocusTerminalDown,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -1393,7 +1681,7 @@ struct PaletteEntry {
     group: PaletteGroup,
 }
 
-const PALETTE_COMMANDS: [PaletteEntry; 8] = [
+const PALETTE_COMMANDS: [PaletteEntry; 12] = [
     PaletteEntry {
         label: "New Workspace",
         command: PaletteCommand::NewWorkspace,
@@ -1448,6 +1736,34 @@ const PALETTE_COMMANDS: [PaletteEntry; 8] = [
         command: PaletteCommand::PreviousWorkspace,
         shortcut: "Ctrl PgUp",
         icon: "‹",
+        group: PaletteGroup::Navigation,
+    },
+    PaletteEntry {
+        label: "Focus Terminal Left",
+        command: PaletteCommand::FocusTerminalLeft,
+        shortcut: "Ctrl Shift ←",
+        icon: "←",
+        group: PaletteGroup::Navigation,
+    },
+    PaletteEntry {
+        label: "Focus Terminal Right",
+        command: PaletteCommand::FocusTerminalRight,
+        shortcut: "Ctrl Shift →",
+        icon: "→",
+        group: PaletteGroup::Navigation,
+    },
+    PaletteEntry {
+        label: "Focus Terminal Up",
+        command: PaletteCommand::FocusTerminalUp,
+        shortcut: "Ctrl Shift ↑",
+        icon: "↑",
+        group: PaletteGroup::Navigation,
+    },
+    PaletteEntry {
+        label: "Focus Terminal Down",
+        command: PaletteCommand::FocusTerminalDown,
+        shortcut: "Ctrl Shift ↓",
+        icon: "↓",
         group: PaletteGroup::Navigation,
     },
 ];
@@ -2005,6 +2321,35 @@ fn modal_primary_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
     response
 }
 
+fn modal_danger_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(64.0, 32.0), Sense::click());
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
+    });
+    let fill = if response.is_pointer_button_down_on() {
+        Color32::from_rgb(180, 18, 32)
+    } else if response.hovered() || response.has_focus() {
+        Color32::from_rgb(200, 22, 38)
+    } else {
+        danger()
+    };
+    ui.painter().rect(
+        rect,
+        6.0,
+        fill,
+        Stroke::new(1.0, Color32::WHITE),
+        egui::StrokeKind::Inside,
+    );
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        label,
+        FontId::proportional(14.0),
+        Color32::WHITE,
+    );
+    response
+}
+
 struct TerminalPane {
     id: PaneId,
     parser: vt100::Parser,
@@ -2012,6 +2357,7 @@ struct TerminalPane {
     columns: u16,
     rows: u16,
     selection: Option<TerminalSelection>,
+    mouse_buttons: u8,
     pending_output: Vec<u8>,
     synchronized_output_since: Option<Instant>,
     reveal_started_at: Instant,
@@ -2055,6 +2401,7 @@ impl TerminalPane {
             columns: metadata.cols,
             rows: metadata.rows,
             selection: None,
+            mouse_buttons: 0,
             pending_output: Vec::new(),
             synchronized_output_since: None,
             reveal_started_at: Instant::now(),
@@ -2121,7 +2468,41 @@ impl TerminalPane {
         self.process_complete_output_frames();
     }
 
+    fn handle_osc52_clipboard(&mut self) {
+        use base64::Engine;
+        loop {
+            let Some(start) = find_bytes(&self.pending_output, b"\x1b]52;c;") else {
+                return;
+            };
+            let data_start = start + 7;
+            let rest = &self.pending_output[data_start..];
+            let end_pos = rest
+                .iter()
+                .position(|&b| b == 0x07)
+                .or_else(|| rest.windows(2).position(|w| w == b"\x1b\\"));
+            let Some(end_offset) = end_pos else {
+                return;
+            };
+            let encoded = &rest[..end_offset];
+            let seq_end = data_start
+                + end_offset
+                + if rest.get(end_offset..end_offset + 2) == Some(b"\x1b\\") {
+                    2
+                } else {
+                    1
+                };
+            if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(encoded)
+                && let Ok(text) = String::from_utf8(decoded)
+                && let Ok(mut clipboard) = arboard::Clipboard::new()
+            {
+                let _ = clipboard.set_text(&text);
+            }
+            self.pending_output.drain(start..seq_end);
+        }
+    }
+
     fn process_complete_output_frames(&mut self) {
+        self.handle_osc52_clipboard();
         loop {
             if self.synchronized_output_since.is_some() {
                 if let Some(end) = find_bytes(&self.pending_output, SYNCHRONIZED_OUTPUT_END) {
@@ -2390,6 +2771,7 @@ fn render_layout(
     clippy::cast_sign_loss,
     clippy::too_many_lines
 )]
+#[allow(clippy::collapsible_if, clippy::if_not_else, clippy::single_match_else)]
 fn terminal_pane_ui(
     ui: &mut egui::Ui,
     rect: egui::Rect,
@@ -2400,6 +2782,14 @@ fn terminal_pane_ui(
     accept_input: bool,
 ) {
     ui.painter().rect_filled(rect, 0.0, terminal_background());
+    if active {
+        ui.painter().rect_stroke(
+            rect.shrink(0.5),
+            0.0,
+            Stroke::new(1.0, active_terminal_border()),
+            egui::StrokeKind::Inside,
+        );
+    }
     pane.flush_expired_synchronized_output(ui.ctx());
     pane.refresh_git_status();
     let footer_top = (rect.bottom() - TERMINAL_FOOTER_HEIGHT).max(rect.top());
@@ -2509,48 +2899,168 @@ fn terminal_pane_ui(
     let response = ui.interact(
         content_rect,
         egui::Id::new(("terminal-content", pane.id)),
-        Sense::click_and_drag(),
+        Sense::click_and_drag() | Sense::hover(),
     );
     if pane.close_started_at.is_none() && (response.clicked() || response.drag_started()) {
         *active_pane = Some(pane.id);
         let _ = requests.send(ClientRequest::FocusPane { pane_id: pane.id });
         response.request_focus();
     }
-    if pane.close_started_at.is_none() && response.clicked() {
-        pane.selection = None;
-    }
-    if pane.close_started_at.is_none() && response.drag_started() {
-        if let Some(position) = response.interact_pointer_pos().and_then(|pointer| {
-            cell_at_pointer(
-                pointer,
-                content_rect,
-                grid_origin,
-                pane.rows,
-                pane.columns,
-                cell_width,
-                cell_height,
-            )
-        }) {
-            pane.selection = Some(TerminalSelection {
-                start: position,
-                end: position,
-            });
+
+    let mouse_mode_active = {
+        let screen = pane.parser.screen();
+        screen.mouse_protocol_mode() != vt100::MouseProtocolMode::None
+    };
+
+    if mouse_mode_active {
+        let events = ui.ctx().input(|input| input.events.clone());
+        for event in &events {
+            if let egui::Event::PointerButton {
+                pos,
+                button,
+                pressed,
+                modifiers,
+            } = event
+            {
+                if modifiers.shift {
+                    continue;
+                }
+                if pos.x < content_rect.left()
+                    || pos.x > content_rect.right()
+                    || pos.y < content_rect.top()
+                    || pos.y > content_rect.bottom()
+                {
+                    continue;
+                }
+                if let Some(cell) = cell_at_pointer(
+                    *pos,
+                    content_rect,
+                    grid_origin,
+                    pane.rows,
+                    pane.columns,
+                    cell_width,
+                    cell_height,
+                ) {
+                    let screen = pane.parser.screen();
+                    let mouse_encoding = screen.mouse_protocol_encoding();
+                    let btn: u8 = match button {
+                        eframe::egui::PointerButton::Primary => 0,
+                        eframe::egui::PointerButton::Middle => 1,
+                        eframe::egui::PointerButton::Secondary => 2,
+                        _ => continue,
+                    };
+                    let button_byte = if *pressed {
+                        pane.mouse_buttons |= 1 << btn;
+                        btn
+                    } else {
+                        pane.mouse_buttons &= !(1 << btn);
+                        3
+                    };
+                    let col = cell.column.saturating_add(1);
+                    let row = cell.row.saturating_add(1);
+                    let seq = match mouse_encoding {
+                        vt100::MouseProtocolEncoding::Sgr => {
+                            if *pressed {
+                                format!("\x1b[<{button_byte};{col};{row}M")
+                            } else {
+                                format!("\x1b[<{button_byte};{col};{row}m")
+                            }
+                        }
+                        _ => {
+                            let c = (col + 32).min(255) as u8;
+                            let r = (row + 32).min(255) as u8;
+                            format!(
+                                "\x1b[M{}{}{}",
+                                (button_byte + 32) as char,
+                                c as char,
+                                r as char,
+                            )
+                        }
+                    };
+                    pane.send(requests, seq.into_bytes());
+                }
+            } else if let egui::Event::PointerMoved(pos) = event {
+                if pane.mouse_buttons == 0 {
+                    continue;
+                }
+                if pos.x < content_rect.left()
+                    || pos.x > content_rect.right()
+                    || pos.y < content_rect.top()
+                    || pos.y > content_rect.bottom()
+                {
+                    continue;
+                }
+                if let Some(cell) = cell_at_pointer(
+                    *pos,
+                    content_rect,
+                    grid_origin,
+                    pane.rows,
+                    pane.columns,
+                    cell_width,
+                    cell_height,
+                ) {
+                    let screen = pane.parser.screen();
+                    let mouse_encoding = screen.mouse_protocol_encoding();
+                    let held = pane.mouse_buttons.trailing_zeros() as u8;
+                    let button_byte = held | 32;
+                    let col = cell.column.saturating_add(1);
+                    let row = cell.row.saturating_add(1);
+                    let seq = match mouse_encoding {
+                        vt100::MouseProtocolEncoding::Sgr => {
+                            format!("\x1b[<{button_byte};{col};{row}M")
+                        }
+                        _ => {
+                            let c = (col + 32).min(255) as u8;
+                            let r = (row + 32).min(255) as u8;
+                            format!(
+                                "\x1b[M{}{}{}",
+                                (button_byte + 32) as char,
+                                c as char,
+                                r as char,
+                            )
+                        }
+                    };
+                    pane.send(requests, seq.into_bytes());
+                }
+            }
         }
-    } else if response.dragged()
-        && let Some(position) = response.interact_pointer_pos().and_then(|pointer| {
-            cell_at_pointer(
-                pointer,
-                content_rect,
-                grid_origin,
-                pane.rows,
-                pane.columns,
-                cell_width,
-                cell_height,
-            )
-        })
-        && let Some(selection) = &mut pane.selection
-    {
-        selection.end = position;
+    } else {
+        if pane.close_started_at.is_none() && response.clicked() {
+            pane.selection = None;
+        }
+        if pane.close_started_at.is_none() && response.drag_started() {
+            if let Some(position) = response.interact_pointer_pos().and_then(|pointer| {
+                cell_at_pointer(
+                    pointer,
+                    content_rect,
+                    grid_origin,
+                    pane.rows,
+                    pane.columns,
+                    cell_width,
+                    cell_height,
+                )
+            }) {
+                pane.selection = Some(TerminalSelection {
+                    start: position,
+                    end: position,
+                });
+            }
+        } else if response.dragged()
+            && let Some(position) = response.interact_pointer_pos().and_then(|pointer| {
+                cell_at_pointer(
+                    pointer,
+                    content_rect,
+                    grid_origin,
+                    pane.rows,
+                    pane.columns,
+                    cell_width,
+                    cell_height,
+                )
+            })
+            && let Some(selection) = &mut pane.selection
+        {
+            selection.end = position;
+        }
     }
 
     if active && !screen.hide_cursor() {
@@ -2567,14 +3077,59 @@ fn terminal_pane_ui(
     if response.hovered() {
         let scroll = ui.ctx().input(|input| input.smooth_scroll_delta().y);
         if scroll.abs() > f32::EPSILON {
-            let current = pane.parser.screen().scrollback();
-            let lines = scroll_lines(scroll);
-            let next = if scroll > 0.0 {
-                current.saturating_add(lines)
+            let screen = pane.parser.screen();
+            let mouse_mode = screen.mouse_protocol_mode();
+            let mouse_encoding = screen.mouse_protocol_encoding();
+            let _ = screen;
+
+            if mouse_mode != vt100::MouseProtocolMode::None {
+                let pointer = response
+                    .interact_pointer_pos()
+                    .or_else(|| ui.ctx().input(|input| input.pointer.hover_pos()));
+                if let Some(pointer) = pointer {
+                    if let Some(cell) = cell_at_pointer(
+                        pointer,
+                        content_rect,
+                        grid_origin,
+                        pane.rows,
+                        pane.columns,
+                        cell_width,
+                        cell_height,
+                    ) {
+                        let lines = scroll_lines(scroll);
+                        let col = cell.column.saturating_add(1);
+                        let row = cell.row.saturating_add(1);
+                        let button: u8 = if scroll > 0.0 { 64 } else { 65 };
+                        for _ in 0..lines {
+                            let seq = match mouse_encoding {
+                                vt100::MouseProtocolEncoding::Sgr => {
+                                    format!("\x1b[<{button};{col};{row}M")
+                                }
+                                _ => {
+                                    let c = (col + 32).min(255) as u8;
+                                    let r = (row + 32).min(255) as u8;
+                                    format!(
+                                        "\x1b[M{}{}{}",
+                                        (button + 32) as char,
+                                        c as char,
+                                        r as char,
+                                    )
+                                }
+                            };
+                            pane.send(requests, seq.into_bytes());
+                        }
+                    }
+                }
             } else {
-                current.saturating_sub(lines)
-            };
-            pane.parser.screen_mut().set_scrollback(next);
+                let current = pane.parser.screen().scrollback();
+                let lines = scroll_lines(scroll);
+                let next = if scroll > 0.0 {
+                    current.saturating_add(lines)
+                } else {
+                    current.saturating_sub(lines)
+                };
+                pane.parser.screen_mut().set_scrollback(next);
+            }
         }
     }
 
@@ -3042,9 +3597,23 @@ fn forward_terminal_input(
     requests: &Sender<ClientRequest>,
 ) {
     let events = context.input(|input| input.events.clone());
+    let paste_event = events.iter().find_map(|event| match event {
+        egui::Event::Paste(text) => Some(!text.is_empty()),
+        _ => None,
+    });
     for event in events {
         match event {
             egui::Event::Text(text) if !text.is_empty() => {
+                // Skip text events when Ctrl is held — the Key handler
+                // already encodes Ctrl+letter as a control character.
+                if context.input(|input| input.modifiers.ctrl) {
+                    continue;
+                }
+                // Skip Enter/newline — the Key handler encodes Key::Enter
+                // as "\r", so the Text event would be a duplicate.
+                if text == "\r" || text == "\n" {
+                    continue;
+                }
                 let mut bytes = text.into_bytes();
                 if context.input(|input| input.modifiers.alt) {
                     bytes.insert(0, 0x1b);
@@ -3052,7 +3621,11 @@ fn forward_terminal_input(
                 pane.send(requests, bytes);
             }
             egui::Event::Paste(text) => {
-                pane.send(requests, pane.paste_bytes(&text));
+                if text.is_empty() {
+                    try_image_paste(pane, requests);
+                } else {
+                    pane.send(requests, pane.paste_bytes(&text));
+                }
             }
             egui::Event::Key {
                 key,
@@ -3061,7 +3634,17 @@ fn forward_terminal_input(
                 modifiers,
                 ..
             } => {
-                if let Some(bytes) = encode_key(key, modifiers, pane.parser.screen()) {
+                if modifiers.ctrl && !modifiers.shift && key == Key::C && pane.selection.is_some() {
+                    if let Some(text) = pane.selected_text() {
+                        context.copy_text(text);
+                    }
+                } else if modifiers.ctrl && key == Key::V {
+                    if paste_event == Some(false) {
+                        try_image_paste(pane, requests);
+                    } else if paste_event.is_none() {
+                        try_clipboard_paste(pane, requests);
+                    }
+                } else if let Some(bytes) = encode_key(key, modifiers, pane.parser.screen()) {
                     pane.send(requests, bytes);
                 }
             }
@@ -3320,6 +3903,10 @@ fn terminal_divider_color() -> Color32 {
 
 fn danger() -> Color32 {
     Color32::from_rgb(226, 22, 42)
+}
+
+fn active_terminal_border() -> Color32 {
+    Color32::from_rgb(0, 112, 243)
 }
 
 fn ordered_selection(selection: TerminalSelection, columns: u16) -> (CellPosition, CellPosition) {
