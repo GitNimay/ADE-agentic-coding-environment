@@ -19,5 +19,17 @@ self_update = { version = "0.44.0", default-features = false, features = ["ureq"
 vt100.workspace = true
 windows.workspace = true
 
+[build-dependencies]
+ico = "0.5.0"
+image.workspace = true
+winresource = "0.1.31"
+
+[package.metadata.winresource]
+CompanyName = "GitNimay"
+FileDescription = "Termy agentic coding terminal"
+InternalName = "termy"
+OriginalFilename = "termy.exe"
+ProductName = "Termy"
+
 [lints]
 workspace = true

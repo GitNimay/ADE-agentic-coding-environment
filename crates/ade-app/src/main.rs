@@ -26,6 +26,8 @@ use eframe::egui::{
 };
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::System::Pipes::PeekNamedPipe;
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_INSERT, VK_V};
+use windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
 
 const SCROLLBACK_LINES: usize = 10_000;
 const TERMINAL_FONT_SIZE: f32 = 14.0;
@@ -90,6 +92,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    // A stable identity keeps taskbar pins and running windows grouped as the same application.
+    unsafe { SetCurrentProcessExplicitAppUserModelID(windows::core::w!("GitNimay.Termy"))? };
     let app_icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/app-icon.png"))?;
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
@@ -138,7 +142,6 @@ impl DaemonClient {
         &self,
         request: ClientRequest,
     ) -> Result<(), crossbeam_channel::SendError<ClientRequest>> {
-        diagnostic_log(&format!("queue request: {request:?}"));
         self.requests.send(request)
     }
 }
@@ -178,7 +181,6 @@ fn daemon_io_loop(
 ) {
     loop {
         for request in requests.try_iter() {
-            diagnostic_log(&format!("write request: {request:?}"));
             if write_frame(&mut pipe, &Versioned::new(request)).is_err() {
                 diagnostic_log("request writer disconnected");
                 return;
@@ -199,7 +201,9 @@ fn daemon_io_loop(
             diagnostic_log("event reader disconnected");
             return;
         };
-        diagnostic_log(&format!("read event: {}", event_summary(&event.message)));
+        if !matches!(event.message, ServerEvent::TerminalOutput { .. }) {
+            diagnostic_log(&format!("read event: {}", event_summary(&event.message)));
+        }
         if event.protocol_version != PROTOCOL_VERSION || events.send(event.message).is_err() {
             return;
         }
@@ -302,25 +306,12 @@ fn quoted_terminal_path(path: &Path) -> String {
     format!("\"{}\"", path.to_string_lossy())
 }
 
-fn try_image_paste(pane: &TerminalPane, requests: &Sender<ClientRequest>) -> bool {
-    if let Ok(path) = save_clipboard_image() {
-        pane.send(requests, pane.paste_bytes(&quoted_terminal_path(&path)));
-        true
-    } else {
-        false
-    }
-}
-
-fn try_clipboard_paste(pane: &TerminalPane, requests: &Sender<ClientRequest>) {
-    if try_image_paste(pane, requests) {
-        return;
-    }
-    if let Ok(mut clipboard) = arboard::Clipboard::new()
-        && let Ok(text) = clipboard.get_text()
-        && !text.is_empty()
-    {
-        pane.send(requests, pane.paste_bytes(&text));
-    }
+fn paste_shortcut_is_down(modifiers: Modifiers) -> bool {
+    // egui-winit consumes image-only paste shortcuts without emitting an event, so inspect the
+    // native key state while raw input from that key press is being prepared.
+    let v_down = unsafe { GetAsyncKeyState(i32::from(VK_V.0)) < 0 };
+    let insert_down = unsafe { GetAsyncKeyState(i32::from(VK_INSERT.0)) < 0 };
+    (modifiers.command && v_down) || (modifiers.shift && insert_down)
 }
 
 fn cleanup_old_clipboard_images() {
@@ -367,6 +358,8 @@ struct AdeApp {
     sidebar_left_at: Option<Instant>,
     terminal_limit_popup: bool,
     close_requested: bool,
+    shutdown_requested: bool,
+    paste_shortcut_down: bool,
     update_results: Receiver<UpdateNotice>,
     update_message: Option<String>,
 }
@@ -405,6 +398,8 @@ impl AdeApp {
             sidebar_left_at: None,
             terminal_limit_popup: false,
             close_requested: false,
+            shutdown_requested: false,
+            paste_shortcut_down: false,
             update_results,
             update_message: None,
         };
@@ -434,7 +429,8 @@ impl AdeApp {
         })
     }
 
-    fn perform_shutdown(&self, ui: &egui::Ui) {
+    fn perform_shutdown(&mut self, ui: &egui::Ui) {
+        self.shutdown_requested = true;
         if let Some(client) = &self.client {
             let _ = client.send(ClientRequest::Shutdown);
         }
@@ -638,14 +634,6 @@ impl AdeApp {
             && let Some(workspace) = self.workspaces.get(self.active_workspace)
         {
             self.rename_workspace = Some((workspace.model.id, workspace.model.name.clone()));
-        }
-        if context.input_mut(|input| input.consume_shortcut(&shortcut(Key::C)))
-            && let Some(workspace) = self.workspaces.get(self.active_workspace)
-            && let Some(pane_id) = workspace.model.active_pane_id
-            && let Some(pane) = workspace.panes.get(&pane_id)
-            && let Some(text) = pane.selected_text()
-        {
-            context.copy_text(text);
         }
         let previous_pane = context.input_mut(|input| {
             input.consume_shortcut(&KeyboardShortcut::new(
@@ -1359,6 +1347,34 @@ impl AdeApp {
 }
 
 impl eframe::App for AdeApp {
+    fn raw_input_hook(&mut self, _context: &egui::Context, input: &mut egui::RawInput) {
+        let shortcut_down = input.focused && paste_shortcut_is_down(input.modifiers);
+        let has_text_paste = input
+            .events
+            .iter()
+            .any(|event| matches!(event, egui::Event::Paste(_)));
+        let terminal_accepts_input = !self.palette_open
+            && self.rename_workspace.is_none()
+            && self
+                .workspaces
+                .get(self.active_workspace)
+                .and_then(|workspace| workspace.model.active_pane_id)
+                .is_some();
+
+        if shortcut_down && !self.paste_shortcut_down && !has_text_paste && terminal_accepts_input {
+            match save_clipboard_image() {
+                Ok(path) => input
+                    .events
+                    .push(egui::Event::Paste(quoted_terminal_path(&path))),
+                Err(arboard::Error::ContentNotAvailable) => {}
+                Err(error) => {
+                    self.error_message = Some(format!("Could not paste clipboard image: {error}"));
+                }
+            }
+        }
+        self.paste_shortcut_down = shortcut_down;
+    }
+
     #[allow(clippy::too_many_lines)]
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let context = ui.ctx().clone();
@@ -1369,7 +1385,7 @@ impl eframe::App for AdeApp {
 
         // Intercept close requests (from title bar button, Alt+F4, or OS)
         let viewport_close = ui.input(|input| input.viewport().close_requested());
-        if viewport_close {
+        if viewport_close && !self.shutdown_requested {
             ui.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             if !self.close_requested {
                 if self.has_active_sessions() {
@@ -2786,8 +2802,9 @@ fn terminal_pane_ui(
     let screen = pane.parser.screen();
     let (cursor_row, cursor_column) = screen.cursor_position();
     let divider_rows = terminal_divider_rows(screen);
-    let bottom_anchored = !screen.alternate_screen() && screen.scrollback() == 0;
-    let block_chrome = bottom_anchored && !terminal_application_mode(screen);
+    let application_mode = terminal_application_mode(screen);
+    let bottom_anchored = !application_mode && screen.scrollback() == 0;
+    let block_chrome = bottom_anchored;
     let visual_end_row = terminal_visual_end_row(screen);
     let grid_origin = egui::pos2(
         snap_to_pixel(content_rect.left(), pixels_per_point),
@@ -2877,7 +2894,8 @@ fn terminal_pane_ui(
         screen.mouse_protocol_mode() != vt100::MouseProtocolMode::None
     };
 
-    if mouse_mode_active {
+    let selection_override = ui.ctx().input(|input| input.modifiers.shift);
+    if mouse_mode_active && !selection_override {
         let events = ui.ctx().input(|input| input.events.clone());
         for event in &events {
             if let egui::Event::PointerButton {
@@ -3509,6 +3527,8 @@ fn terminal_application_mode(screen: &vt100::Screen) -> bool {
         || screen.hide_cursor()
         || screen.application_cursor()
         || screen.application_keypad()
+        || screen.bracketed_paste()
+        || screen.mouse_protocol_mode() != vt100::MouseProtocolMode::None
 }
 
 fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
@@ -3562,12 +3582,18 @@ fn forward_terminal_input(
     requests: &Sender<ClientRequest>,
 ) {
     let events = context.input(|input| input.events.clone());
-    let paste_event = events.iter().find_map(|event| match event {
-        egui::Event::Paste(text) => Some(!text.is_empty()),
-        _ => None,
-    });
+    let has_paste = events
+        .iter()
+        .any(|event| matches!(event, egui::Event::Paste(text) if !text.is_empty()));
     for event in events {
         match event {
+            egui::Event::Copy => {
+                if let Some(text) = pane.selected_text() {
+                    context.copy_text(text);
+                } else if !context.input(|input| input.modifiers.shift) {
+                    pane.send(requests, vec![0x03]);
+                }
+            }
             egui::Event::Text(text) if !text.is_empty() => {
                 // Skip text events when Ctrl is held — the Key handler
                 // already encodes Ctrl+letter as a control character.
@@ -3585,12 +3611,8 @@ fn forward_terminal_input(
                 }
                 pane.send(requests, bytes);
             }
-            egui::Event::Paste(text) => {
-                if text.is_empty() {
-                    try_image_paste(pane, requests);
-                } else {
-                    pane.send(requests, pane.paste_bytes(&text));
-                }
+            egui::Event::Paste(text) if !text.is_empty() => {
+                pane.send(requests, pane.paste_bytes(&text));
             }
             egui::Event::Key {
                 key,
@@ -3599,15 +3621,15 @@ fn forward_terminal_input(
                 modifiers,
                 ..
             } => {
+                if has_paste
+                    && ((modifiers.ctrl && key == Key::V)
+                        || (modifiers.shift && key == Key::Insert))
+                {
+                    continue;
+                }
                 if modifiers.ctrl && !modifiers.shift && key == Key::C && pane.selection.is_some() {
                     if let Some(text) = pane.selected_text() {
                         context.copy_text(text);
-                    }
-                } else if modifiers.ctrl && key == Key::V {
-                    if paste_event == Some(false) {
-                        try_image_paste(pane, requests);
-                    } else if paste_event.is_none() {
-                        try_clipboard_paste(pane, requests);
                     }
                 } else if let Some(bytes) = encode_key(key, modifiers, pane.parser.screen()) {
                     pane.send(requests, bytes);
@@ -4262,8 +4284,32 @@ mod tests {
     fn tui_modes_disable_shell_block_chrome() {
         let mut parser = vt100::Parser::new(12, 80, 100);
         assert!(!terminal_application_mode(parser.screen()));
+
         parser.process(b"\x1b[?25l");
         assert!(terminal_application_mode(parser.screen()));
+
+        parser.process(b"\x1b[?25h\x1b[?2004h");
+        assert!(!parser.screen().alternate_screen());
+        assert!(terminal_application_mode(parser.screen()));
+
+        parser.process(b"\x1b[?2004l\x1b[?1000h");
+        assert!(terminal_application_mode(parser.screen()));
+
+        parser.process(b"\x1b[?1000l");
+        assert!(!terminal_application_mode(parser.screen()));
+    }
+
+    #[test]
+    fn inline_tui_ignores_stale_shell_block_marker() {
+        let mut parser = vt100::Parser::new(12, 80, 100);
+        parser.process(
+            format!("\x1b[8m{TERMINAL_DIVIDER_MARKER}\x1b[0m\r\nPS> codex\r\n\x1b[?2004h")
+                .as_bytes(),
+        );
+
+        assert_eq!(terminal_divider_rows(parser.screen()), vec![0]);
+        assert!(terminal_application_mode(parser.screen()));
+        assert!(!parser.screen().alternate_screen());
     }
 
     #[test]

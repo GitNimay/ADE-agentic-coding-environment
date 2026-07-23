@@ -61,8 +61,8 @@ Default shortcuts:
 - `Ctrl+Shift+E`: split down
 - `Ctrl+Alt+Arrow`: move pane focus
 - `Ctrl+Shift+W`: close active pane
-- `Ctrl+Shift+C`: copy the selected terminal text
-- `Ctrl+Shift+V`: paste with bracketed-paste support
+- `Ctrl+C` / `Ctrl+Shift+C`: copy selected terminal text
+- `Ctrl+V` / `Ctrl+Shift+V`: paste text or a clipboard image with bracketed-paste support
 - `Ctrl+Shift+P`: command palette
 - `Ctrl+PageUp` / `Ctrl+PageDown`: switch workspace
 - `F2`: rename the active workspace

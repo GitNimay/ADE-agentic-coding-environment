@@ -33,6 +33,7 @@ use windows::core::PCWSTR;
 use crate::{DaemonError, DaemonState, StateAction, load_state};
 
 const OUTPUT_LIMIT: usize = 8 * 1024 * 1024;
+const REPLAY_CHUNK_SIZE: usize = 64 * 1024;
 const CLIENT_EVENT_CAPACITY: usize = 256;
 const PIPE_BUFFER_SIZE: u32 = 64 * 1024;
 const POWERSHELL_PROMPT_HOOK: &str = r#"
@@ -133,10 +134,13 @@ impl OutputHub {
         let mut events = vec![ServerEvent::Attached { snapshot }];
         for (&pane_id, buffer) in &self.buffers {
             if !buffer.is_empty() {
-                events.push(ServerEvent::TerminalOutput {
-                    pane_id,
-                    data: buffer.iter().copied().collect(),
-                });
+                let data: Vec<_> = buffer.iter().copied().collect();
+                events.extend(data.chunks(REPLAY_CHUNK_SIZE).map(|chunk| {
+                    ServerEvent::TerminalOutput {
+                        pane_id,
+                        data: chunk.to_vec(),
+                    }
+                }));
             }
         }
         (client_id, events)
@@ -798,6 +802,27 @@ mod tests {
             second_rx.try_recv(),
             Ok(ServerEvent::Error { .. })
         ));
+    }
+
+    #[test]
+    fn replay_is_chunked_without_losing_output() {
+        let mut output = OutputHub::default();
+        let pane_id = PaneId::new();
+        let expected = vec![0xff; REPLAY_CHUNK_SIZE * 2 + 17];
+        let _ = output.append(pane_id, &expected);
+
+        let (_, replay) = output.replay_for_attach(AppSnapshot::default());
+        let chunks: Vec<_> = replay
+            .into_iter()
+            .filter_map(|event| match event {
+                ServerEvent::TerminalOutput { pane_id: id, data } if id == pane_id => Some(data),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(chunks.len(), 3);
+        assert!(chunks.iter().all(|chunk| chunk.len() <= REPLAY_CHUNK_SIZE));
+        assert_eq!(chunks.concat(), expected);
     }
 
     #[test]

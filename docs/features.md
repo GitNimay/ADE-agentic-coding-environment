@@ -246,20 +246,23 @@ copying, and opening the palette do not leak their keystrokes into the shell.
 ### 4.3 Selection and copy
 
 Dragging over terminal cells creates a rectangular start/end selection that is normalized even
-when dragged backwards. Selected cells are highlighted in blue. **Ctrl+Shift+C** copies the
-selected text to the system clipboard. Clicking without dragging clears the current selection.
+when dragged backwards. Hold **Shift** while dragging when a TUI has enabled mouse reporting.
+Selected cells are highlighted in blue. **Ctrl+C** or **Ctrl+Shift+C** copies the selected text to
+the system clipboard; without a selection, **Ctrl+C** remains available to interrupt the terminal
+process. Clicking without dragging clears the current selection.
 
 Invisible command-block marker text inserted by the PowerShell prompt hook is removed from copied
 content.
 
 ### 4.4 Paste and bracketed paste
 
-**Ctrl+Shift+V** reads from the Windows clipboard. Plain text is normalized by converting Windows
-CRLF line endings to LF and removing null characters before it is sent. Clipboard images are saved
-as PNG files under `%LOCALAPPDATA%\ADE\clipboard-images`, then the quoted absolute image path is
-pasted into the active terminal for CLI apps that accept image/file paths. If the active terminal
-has enabled bracketed-paste mode, the app wraps the payload in the standard `ESC[200~` and
-`ESC[201~` sequences so compatible shells and programs can treat it as pasted data.
+**Ctrl+V** or **Ctrl+Shift+V** reads from the Windows clipboard. Plain text is normalized by
+converting Windows CRLF line endings to LF and removing null characters before it is sent.
+Clipboard images are saved as PNG files under `%LOCALAPPDATA%\ADE\clipboard-images`, then the
+quoted absolute image path is pasted into the active terminal for CLI apps that accept image/file
+paths. If the active terminal has enabled bracketed-paste mode, the app wraps the payload in the
+standard `ESC[200~` and `ESC[201~` sequences so compatible shells and programs can treat it as
+pasted data.
 
 Paste events delivered directly by the UI follow the same normalization and bracketed-paste logic.
 Clipboard access failures appear in the in-app error dialog.
@@ -351,8 +354,8 @@ Terminal input is temporarily disabled while the palette or rename dialog is act
 | `Ctrl+Shift+D` | Add a pane using the Split Right action |
 | `Ctrl+Shift+E` | Add a pane using the Split Down action |
 | `Ctrl+Shift+W` | Close the active pane |
-| `Ctrl+Shift+C` | Copy selected terminal text |
-| `Ctrl+Shift+V` | Paste into the active terminal |
+| `Ctrl+C` / `Ctrl+Shift+C` | Copy selected terminal text |
+| `Ctrl+V` / `Ctrl+Shift+V` | Paste text or a clipboard image into the active terminal |
 | `Ctrl+Shift+P` | Open the command palette |
 | `Ctrl+K` | Open the command palette |
 | `Ctrl+Alt+Left` / `Ctrl+Alt+Up` | Focus the previous pane |
