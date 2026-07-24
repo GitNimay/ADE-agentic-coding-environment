@@ -1685,164 +1685,138 @@ impl AdeApp {
 
     #[allow(clippy::too_many_lines)]
     fn settings_page(&mut self, context: &egui::Context) {
-        if self.settings_open
-            && context.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Escape))
-        {
-            self.settings_open = false;
+        if !self.settings_open {
+            return;
         }
-        let reveal = context.animate_bool_with_time_and_easing(
-            egui::Id::new("settings-page-reveal"),
-            self.settings_open,
-            0.18,
-            egui::emath::easing::cubic_out,
-        );
-        if !self.settings_open && reveal <= 0.001 {
+        if context.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Escape)) {
+            self.settings_open = false;
             return;
         }
 
         let content_rect = context.content_rect();
-        let backdrop = egui::Area::new(egui::Id::new("settings-page-backdrop"))
-            .order(egui::Order::Foreground)
-            .fixed_pos(content_rect.min)
-            .show(context, |ui| {
-                let (rect, response) = ui.allocate_exact_size(content_rect.size(), Sense::click());
-                ui.painter().rect_filled(
-                    rect,
-                    0.0,
-                    Color32::from_black_alpha(162).gamma_multiply(reveal),
-                );
-                response
-            })
-            .inner;
-        if backdrop.clicked() {
-            self.settings_open = false;
-        }
+        let panel_width = (content_rect.width() - 56.0).clamp(320.0, 920.0);
+        let panel_height = (content_rect.height() - 64.0).clamp(300.0, 640.0);
+        let modal_frame = egui::Frame::NONE
+            .fill(vercel_bg())
+            .stroke(Stroke::new(1.0, vercel_border()))
+            .corner_radius(8.0)
+            .shadow(egui::epaint::Shadow {
+                offset: [0, 16],
+                blur: 40,
+                spread: 0,
+                color: Color32::from_black_alpha(190),
+            });
 
-        let final_width = (content_rect.width() - 56.0).clamp(320.0, 920.0);
-        let final_height = (content_rect.height() - 64.0).clamp(300.0, 640.0);
-        let panel_width = egui::lerp(final_width * 0.985..=final_width, reveal);
-        let panel_height = egui::lerp(final_height * 0.985..=final_height, reveal);
-        egui::Area::new(egui::Id::new("settings-page"))
-            .order(egui::Order::Foreground)
-            .pivot(egui::Align2::CENTER_CENTER)
-            .fixed_pos(content_rect.center())
+        let response = egui::Modal::new(egui::Id::new("settings-page-modal"))
+            .backdrop_color(Color32::from_black_alpha(162))
+            .frame(modal_frame)
             .show(context, |ui| {
                 ui.set_width(panel_width);
                 ui.set_height(panel_height);
-                egui::Frame::NONE
-                    .fill(vercel_bg())
-                    .stroke(Stroke::new(1.0, vercel_border()))
-                    .corner_radius(8.0)
-                    .shadow(egui::epaint::Shadow {
-                        offset: [0, 16],
-                        blur: 40,
-                        spread: 0,
-                        color: Color32::from_black_alpha(190).gamma_multiply(reveal),
-                    })
-                    .inner_margin(egui::Margin::same(0))
-                    .show(ui, |ui| {
-                        ui.set_opacity(reveal);
-                        ui.set_min_size(Vec2::new(panel_width, panel_height));
-                        let header_height = 58.0;
-                        let (header_rect, _) = ui.allocate_exact_size(
-                            Vec2::new(panel_width, header_height),
-                            Sense::hover(),
-                        );
-                        ui.painter().text(
-                            header_rect.left_center() + Vec2::new(24.0, 0.0),
-                            egui::Align2::LEFT_CENTER,
-                            "Settings",
-                            FontId::proportional(20.0),
-                            vercel_text_primary(),
-                        );
-                        let close_rect = egui::Rect::from_center_size(
-                            header_rect.right_center() - Vec2::new(24.0, 0.0),
-                            Vec2::splat(28.0),
-                        );
-                        let close = ui.interact(
-                            close_rect,
-                            egui::Id::new("settings-page-close"),
-                            Sense::click(),
-                        );
-                        close.widget_info(|| {
-                            egui::WidgetInfo::labeled(
-                                egui::WidgetType::Button,
-                                ui.is_enabled(),
-                                "Close settings",
-                            )
-                        });
-                        if close.hovered() || close.has_focus() {
-                            ui.painter()
-                                .rect_filled(close_rect, 6.0, vercel_surface_hover());
-                            ui.painter().rect_stroke(
-                                close_rect,
-                                6.0,
-                                Stroke::new(1.0, vercel_border()),
-                                egui::StrokeKind::Inside,
-                            );
-                        }
-                        paint_close_icon(
-                            ui.painter(),
-                            close_rect.center(),
-                            vercel_text_secondary(),
-                        );
-                        if close.clicked() {
-                            self.settings_open = false;
-                        }
+                ui.set_min_size(Vec2::new(panel_width, panel_height));
+                let header_height = 58.0;
+                let (header_rect, _) = ui.allocate_exact_size(
+                    Vec2::new(panel_width, header_height),
+                    Sense::hover(),
+                );
+                ui.painter().text(
+                    header_rect.left_center() + Vec2::new(24.0, 0.0),
+                    egui::Align2::LEFT_CENTER,
+                    "Settings",
+                    FontId::proportional(20.0),
+                    vercel_text_primary(),
+                );
+                let close_rect = egui::Rect::from_center_size(
+                    header_rect.right_center() - Vec2::new(24.0, 0.0),
+                    Vec2::splat(28.0),
+                );
+                let close = ui.interact(
+                    close_rect,
+                    egui::Id::new("settings-page-close"),
+                    Sense::click(),
+                );
+                close.widget_info(|| {
+                    egui::WidgetInfo::labeled(
+                        egui::WidgetType::Button,
+                        ui.is_enabled(),
+                        "Close settings",
+                    )
+                });
+                if close.hovered() || close.has_focus() {
+                    ui.painter()
+                        .rect_filled(close_rect, 6.0, vercel_surface_hover());
+                    ui.painter().rect_stroke(
+                        close_rect,
+                        6.0,
+                        Stroke::new(1.0, vercel_border()),
+                        egui::StrokeKind::Inside,
+                    );
+                }
+                paint_close_icon(
+                    ui.painter(),
+                    close_rect.center(),
+                    vercel_text_secondary(),
+                );
+                if close.clicked() {
+                    ui.close();
+                }
 
-                        ui.painter().hline(
-                            header_rect.x_range(),
-                            header_rect.bottom(),
-                            Stroke::new(1.0, vercel_border()),
-                        );
+                ui.painter().hline(
+                    header_rect.x_range(),
+                    header_rect.bottom(),
+                    Stroke::new(1.0, vercel_border()),
+                );
 
-                        let body_height = (panel_height - header_height).max(0.0);
-                        let (body_rect, _) = ui.allocate_exact_size(
-                            Vec2::new(panel_width, body_height),
-                            Sense::hover(),
-                        );
-                        let sidebar_width = 204.0_f32.min(panel_width * 0.34);
-                        let sidebar_rect = egui::Rect::from_min_max(
-                            body_rect.min,
-                            egui::pos2(body_rect.left() + sidebar_width, body_rect.bottom()),
-                        );
-                        ui.painter().vline(
-                            sidebar_rect.right(),
-                            body_rect.y_range(),
-                            Stroke::new(1.0, vercel_border()),
-                        );
-                        let mut sidebar = ui.new_child(
-                            egui::UiBuilder::new()
-                                .max_rect(sidebar_rect.shrink2(Vec2::new(18.0, 22.0)))
-                                .layout(egui::Layout::top_down(egui::Align::Min)),
-                        );
-                        for section in SettingsSection::ALL {
-                            let response = settings_nav_item(
-                                &mut sidebar,
-                                section.label(),
-                                section == self.settings_section,
-                            );
-                            if response.clicked() {
-                                self.settings_section = section;
-                            }
-                        }
-                        paint_settings_version_footer(ui, sidebar_rect, current_app_version());
-                        let content_rect = egui::Rect::from_min_max(
-                            egui::pos2(sidebar_rect.right(), body_rect.top()),
-                            body_rect.max,
-                        );
-                        let mut settings_content = ui.new_child(
-                            egui::UiBuilder::new()
-                                .max_rect(content_rect.shrink2(Vec2::new(28.0, 24.0)))
-                                .layout(egui::Layout::top_down(egui::Align::Min)),
-                        );
-                        settings_section_content(
-                            &mut settings_content,
-                            self.settings_section,
-                            &mut self.auto_expand_sidebar,
-                        );
-                    });
+                let body_height = (panel_height - header_height).max(0.0);
+                let (body_rect, _) = ui.allocate_exact_size(
+                    Vec2::new(panel_width, body_height),
+                    Sense::hover(),
+                );
+                let sidebar_width = 204.0_f32.min(panel_width * 0.34);
+                let sidebar_rect = egui::Rect::from_min_max(
+                    body_rect.min,
+                    egui::pos2(body_rect.left() + sidebar_width, body_rect.bottom()),
+                );
+                ui.painter().vline(
+                    sidebar_rect.right(),
+                    body_rect.y_range(),
+                    Stroke::new(1.0, vercel_border()),
+                );
+                let mut sidebar = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(sidebar_rect.shrink2(Vec2::new(18.0, 22.0)))
+                        .layout(egui::Layout::top_down(egui::Align::Min)),
+                );
+                for section in SettingsSection::ALL {
+                    let response = settings_nav_item(
+                        &mut sidebar,
+                        section.label(),
+                        section == self.settings_section,
+                    );
+                    if response.clicked() {
+                        self.settings_section = section;
+                    }
+                }
+                paint_settings_version_footer(ui, sidebar_rect, current_app_version());
+                let content_rect = egui::Rect::from_min_max(
+                    egui::pos2(sidebar_rect.right(), body_rect.top()),
+                    body_rect.max,
+                );
+                let mut settings_content = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(content_rect.shrink2(Vec2::new(28.0, 24.0)))
+                        .layout(egui::Layout::top_down(egui::Align::Min)),
+                );
+                settings_section_content(
+                    &mut settings_content,
+                    self.settings_section,
+                    &mut self.auto_expand_sidebar,
+                );
             });
+
+        if response.should_close() {
+            self.settings_open = false;
+        }
     }
 
     #[allow(clippy::too_many_lines)]
