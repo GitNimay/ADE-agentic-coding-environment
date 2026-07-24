@@ -8,6 +8,12 @@ on:
 permissions:
   contents: read
 
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
+  RUSTC_WRAPPER: sccache
+  SCCACHE_GHA_ENABLED: "true"
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -22,6 +28,18 @@ jobs:
       - name: Check out source
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
+      - name: Cache Cargo downloads
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: windows-cargo-v1-${{ hashFiles('Cargo.lock') }}
+          restore-keys: windows-cargo-v1-
+
+      - name: Set up compiler cache
+        uses: mozilla-actions/sccache-action@1583d6b38d7be47f593cb472781bbb21cab4321e # v0.0.10
+
       - name: Show toolchain
         run: |
           rustc --version
@@ -35,3 +53,62 @@ jobs:
 
       - name: Run tests
         run: cargo test --workspace --locked
+
+  release-build:
+    name: Release build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Cache Cargo downloads
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: windows-cargo-v1-${{ hashFiles('Cargo.lock') }}
+          restore-keys: windows-cargo-v1-
+
+      - name: Set up compiler cache
+        uses: mozilla-actions/sccache-action@1583d6b38d7be47f593cb472781bbb21cab4321e # v0.0.10
+
+      - name: Build release executable
+        run: cargo build --release --locked -p ade-app
+
+      - name: Stage and validate release executable
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target/release/ade-app.exe dist/windows-x64-termy.exe
+          $path = Resolve-Path dist/windows-x64-termy.exe
+          $bytes = [System.IO.File]::ReadAllBytes($path)
+          if ($bytes.Length -lt 1024 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {
+            throw "Release artifact is not a valid PE executable"
+          }
+          $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
+          if (
+            $peOffset -lt 0 -or
+            $peOffset + 6 -gt $bytes.Length -or
+            $bytes[$peOffset] -ne 0x50 -or
+            $bytes[$peOffset + 1] -ne 0x45 -or
+            $bytes[$peOffset + 2] -ne 0 -or
+            $bytes[$peOffset + 3] -ne 0
+          ) {
+            throw "Release artifact has an invalid PE header"
+          }
+          $machine = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
+          if ($machine -ne 0x8664) {
+            throw ("Release artifact is not x64 (machine 0x{0:X4})" -f $machine)
+          }
+
+      - name: Upload release executable
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: termy-ci-${{ github.run_number }}-windows-x64
+          path: dist/windows-x64-termy.exe
+          if-no-files-found: error
+          retention-days: 14
