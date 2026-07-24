@@ -1715,10 +1715,8 @@ impl AdeApp {
                 ui.set_height(panel_height);
                 ui.set_min_size(Vec2::new(panel_width, panel_height));
                 let header_height = 58.0;
-                let (header_rect, _) = ui.allocate_exact_size(
-                    Vec2::new(panel_width, header_height),
-                    Sense::hover(),
-                );
+                let (header_rect, _) =
+                    ui.allocate_exact_size(Vec2::new(panel_width, header_height), Sense::hover());
                 ui.painter().text(
                     header_rect.left_center() + Vec2::new(24.0, 0.0),
                     egui::Align2::LEFT_CENTER,
@@ -1752,11 +1750,7 @@ impl AdeApp {
                         egui::StrokeKind::Inside,
                     );
                 }
-                paint_close_icon(
-                    ui.painter(),
-                    close_rect.center(),
-                    vercel_text_secondary(),
-                );
+                paint_close_icon(ui.painter(), close_rect.center(), vercel_text_secondary());
                 if close.clicked() {
                     ui.close();
                 }
@@ -1768,10 +1762,8 @@ impl AdeApp {
                 );
 
                 let body_height = (panel_height - header_height).max(0.0);
-                let (body_rect, _) = ui.allocate_exact_size(
-                    Vec2::new(panel_width, body_height),
-                    Sense::hover(),
-                );
+                let (body_rect, _) =
+                    ui.allocate_exact_size(Vec2::new(panel_width, body_height), Sense::hover());
                 let sidebar_width = 204.0_f32.min(panel_width * 0.34);
                 let sidebar_rect = egui::Rect::from_min_max(
                     body_rect.min,
