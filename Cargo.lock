@@ -133,6 +133,7 @@ dependencies = [
  "image",
  "rfd",
  "self_update",
+ "serde",
  "serde_json",
  "vt100",
  "windows",

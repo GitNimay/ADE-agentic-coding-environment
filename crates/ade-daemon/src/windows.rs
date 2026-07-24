@@ -22,6 +22,9 @@ use windows::Win32::Foundation::{
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_MODE, OPEN_EXISTING, PIPE_ACCESS_DUPLEX,
 };
+use windows::Win32::System::Diagnostics::ToolHelp::{
+    CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
+};
 use windows::Win32::System::IO::CancelIoEx;
 use windows::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE,
@@ -36,6 +39,7 @@ const OUTPUT_LIMIT: usize = 8 * 1024 * 1024;
 const REPLAY_CHUNK_SIZE: usize = 64 * 1024;
 const CLIENT_EVENT_CAPACITY: usize = 256;
 const PIPE_BUFFER_SIZE: u32 = 64 * 1024;
+const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const POWERSHELL_PROMPT_HOOK: &str = r#"
 $global:__ade_escape = [char]27
 if (Get-Module -ListAvailable -Name PSReadLine) {
@@ -75,6 +79,14 @@ const OSC_BUFFER_LIMIT: usize = 8192;
 struct RuntimeSession {
     input: Sender<Vec<u8>>,
     control: Sender<Control>,
+    process_id: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ProcessEntry {
+    process_id: u32,
+    parent_process_id: u32,
+    executable: String,
 }
 
 #[derive(Default)]
@@ -221,6 +233,8 @@ pub(super) fn run() -> Result<(), DaemonError> {
         spawn_pane(&shared, pane.id)?;
     }
     persist_snapshot(&shared)?;
+    let monitor_shared = Arc::clone(&shared);
+    let process_monitor = thread::spawn(move || monitor_pane_processes(&monitor_shared));
 
     let mut clients = Vec::new();
     loop {
@@ -238,6 +252,7 @@ pub(super) fn run() -> Result<(), DaemonError> {
     for client in clients {
         let _ = client.join();
     }
+    let _ = process_monitor.join();
     Ok(())
 }
 
@@ -498,6 +513,7 @@ fn spawn_pane(shared: &Arc<Shared>, pane_id: PaneId) -> Result<(), DaemonError> 
             return Ok(());
         }
     };
+    let process_id = session.process_id();
     let mut reader = session.take_reader()?;
     let mut writer = session.take_writer()?;
     let (input_tx, input_rx) = bounded::<Vec<u8>>(CLIENT_EVENT_CAPACITY);
@@ -539,12 +555,105 @@ fn spawn_pane(shared: &Arc<Shared>, pane_id: PaneId) -> Result<(), DaemonError> 
         RuntimeSession {
             input: input_tx,
             control: control_tx,
+            process_id,
         },
     );
     let status = SessionStatus::Running;
     lock(&shared.state).set_pane_status(pane_id, status.clone())?;
     lock(&shared.output).emit(ServerEvent::PaneStatus { pane_id, status });
     Ok(())
+}
+
+fn monitor_pane_processes(shared: &Shared) {
+    while !shared.shutdown.load(Ordering::Acquire) {
+        if let Ok(processes) = process_snapshot() {
+            let pane_roots: Vec<_> = lock(&shared.sessions)
+                .iter()
+                .map(|(&pane_id, session)| (pane_id, session.process_id))
+                .collect();
+            let mut changed = false;
+            {
+                let mut state = lock(&shared.state);
+                for (pane_id, root_process_id) in pane_roots {
+                    let label = pane_agent_process(&processes, root_process_id)
+                        .unwrap_or(&shared.process_label)
+                        .to_owned();
+                    changed |= state
+                        .set_pane_process_label(pane_id, label)
+                        .unwrap_or(false);
+                }
+            }
+            if changed {
+                let snapshot = lock(&shared.state).snapshot().clone();
+                lock(&shared.output).emit(ServerEvent::WorkspaceUpdated { snapshot });
+            }
+        }
+        thread::sleep(PROCESS_POLL_INTERVAL);
+    }
+}
+
+fn process_snapshot() -> windows::core::Result<Vec<ProcessEntry>> {
+    // SAFETY: the returned snapshot handle is owned locally and closed before returning.
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)? };
+    let mut entry = PROCESSENTRY32W {
+        dwSize: u32::try_from(std::mem::size_of::<PROCESSENTRY32W>())
+            .expect("PROCESSENTRY32W size fits in u32"),
+        ..Default::default()
+    };
+    let mut processes = Vec::new();
+    // SAFETY: snapshot is a live process snapshot and entry has the required dwSize.
+    if unsafe { Process32FirstW(snapshot, &raw mut entry) }.is_ok() {
+        loop {
+            let executable_end = entry
+                .szExeFile
+                .iter()
+                .position(|character| *character == 0)
+                .unwrap_or(entry.szExeFile.len());
+            processes.push(ProcessEntry {
+                process_id: entry.th32ProcessID,
+                parent_process_id: entry.th32ParentProcessID,
+                executable: String::from_utf16_lossy(&entry.szExeFile[..executable_end]),
+            });
+            // SAFETY: snapshot and entry remain valid for the complete enumeration.
+            if unsafe { Process32NextW(snapshot, &raw mut entry) }.is_err() {
+                break;
+            }
+        }
+    }
+    // SAFETY: this function uniquely owns the snapshot handle.
+    let _ = unsafe { CloseHandle(snapshot) };
+    Ok(processes)
+}
+
+fn pane_agent_process(processes: &[ProcessEntry], root_process_id: u32) -> Option<&str> {
+    let mut descendants = vec![root_process_id];
+    let mut cursor = 0;
+    while cursor < descendants.len() {
+        let parent = descendants[cursor];
+        for process in processes {
+            if process.parent_process_id == parent && !descendants.contains(&process.process_id) {
+                descendants.push(process.process_id);
+            }
+        }
+        cursor += 1;
+    }
+
+    processes
+        .iter()
+        .filter(|process| descendants.contains(&process.process_id))
+        .find_map(|process| {
+            let executable = process.executable.to_ascii_lowercase();
+            if executable == "opencode.exe" || executable == "opencode" {
+                Some("opencode")
+            } else if executable == "codex.exe"
+                || executable == "codex"
+                || executable.starts_with("codex-")
+            {
+                Some("codex")
+            } else {
+                None
+            }
+        })
 }
 
 fn update_pane_cwd(shared: &Shared, pane_id: PaneId, cwd: PathBuf) {
@@ -844,5 +953,53 @@ mod tests {
             tracker.process(b"/path\x07middle\x1b]7;file:///D:/NimsWorkspace/my-ADE\x1b\\after"),
             Some(PathBuf::from(r"D:\NimsWorkspace\my-ADE"))
         );
+    }
+
+    #[test]
+    fn pane_agent_process_follows_nested_launcher_descendants() {
+        let processes = [
+            ProcessEntry {
+                process_id: 10,
+                parent_process_id: 1,
+                executable: "pwsh.exe".to_owned(),
+            },
+            ProcessEntry {
+                process_id: 11,
+                parent_process_id: 10,
+                executable: "cmd.exe".to_owned(),
+            },
+            ProcessEntry {
+                process_id: 12,
+                parent_process_id: 11,
+                executable: "codex-x86_64-pc-windows-msvc.exe".to_owned(),
+            },
+            ProcessEntry {
+                process_id: 20,
+                parent_process_id: 1,
+                executable: "opencode.exe".to_owned(),
+            },
+        ];
+
+        assert_eq!(pane_agent_process(&processes, 10), Some("codex"));
+        assert_eq!(pane_agent_process(&processes, 20), Some("opencode"));
+        assert_eq!(pane_agent_process(&processes, 1), Some("codex"));
+    }
+
+    #[test]
+    fn pane_agent_process_does_not_count_unrelated_processes() {
+        let processes = [
+            ProcessEntry {
+                process_id: 10,
+                parent_process_id: 1,
+                executable: "pwsh.exe".to_owned(),
+            },
+            ProcessEntry {
+                process_id: 20,
+                parent_process_id: 1,
+                executable: "codex.exe".to_owned(),
+            },
+        ];
+
+        assert_eq!(pane_agent_process(&processes, 10), None);
     }
 }

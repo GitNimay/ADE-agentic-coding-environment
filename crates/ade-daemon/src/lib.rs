@@ -167,6 +167,29 @@ impl DaemonState {
         Ok(true)
     }
 
+    /// Stores the live foreground process label and returns whether it changed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DaemonError::PaneNotFound`] when the identifier is unknown.
+    pub fn set_pane_process_label(
+        &mut self,
+        pane_id: PaneId,
+        process_label: String,
+    ) -> Result<bool, DaemonError> {
+        let pane = self
+            .snapshot
+            .panes
+            .iter_mut()
+            .find(|pane| pane.id == pane_id)
+            .ok_or(DaemonError::PaneNotFound(pane_id))?;
+        if pane.process_label == process_label {
+            return Ok(false);
+        }
+        pane.process_label = process_label;
+        Ok(true)
+    }
+
     /// Validates and applies one client request, returning its runtime side effect.
     ///
     /// # Errors

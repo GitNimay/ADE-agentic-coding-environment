@@ -24,6 +24,7 @@ use eframe::egui::{
     self, Color32, FontFamily, FontId, Key, KeyboardShortcut, Modifiers, RichText, Sense, Stroke,
     TextFormat, Vec2, text::LayoutJob,
 };
+use serde::{Deserialize, Serialize};
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::System::Pipes::PeekNamedPipe;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_INSERT, VK_V};
@@ -61,6 +62,8 @@ const UPDATE_IDLE_DURATION: Duration = Duration::from_mins(5);
 const CODEX_USAGE_REFRESH_INTERVAL: Duration = Duration::from_secs(20);
 const CODEX_USAGE_HOVER_BRIDGE: Duration = Duration::from_millis(360);
 const CHATGPT_LOGO_SVG: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path fill="#fff" d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.872zm16.5963 3.8558L13.1038 8.364 15.1192 7.2a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.407-.667zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997Z"/></svg>"##;
+const OPENCODE_LOGO_SVG: &[u8] = br##"<svg viewBox="0 0 300 300" fill="none" xmlns="http://www.w3.org/2000/svg"><g transform="translate(30 0)"><path d="M180 240H60V120H180V240Z" fill="#4B4646"/><path d="M180 60H60V240H180V60ZM240 300H0V0H240V300Z" fill="#F1ECEC"/></g></svg>"##;
+const SETTINGS_GEAR_SVG: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.38a2 2 0 0 0-.73-2.73l-.15-.09a2 2 0 0 1-1-1.74v-.51a2 2 0 0 1 1-1.72l.15-.1a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2Z"/><circle cx="12" cy="12" r="3"/></svg>"##;
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const DETACHED_PROCESS: u32 = 0x0000_0008;
@@ -70,6 +73,7 @@ const RELEASE_REPOSITORY_NAME: &str = "ADE-agentic-coding-environment";
 // executable, identical names make the library open its download as the extraction destination
 // and truncate it before replacement.
 const RELEASE_ASSET_NAME: &str = "windows-x64-termy.exe";
+const UI_SETTINGS_STORAGE_KEY: &str = "termy-ui-settings";
 
 enum UpdateEvent {
     CheckComplete(Option<String>),
@@ -89,6 +93,11 @@ enum AppUpdateState {
         version: String,
         restart_after: bool,
     },
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct PersistedUiSettings {
+    auto_expand_sidebar: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -738,6 +747,9 @@ struct AdeApp {
     sidebar_open: bool,
     sidebar_hover_started: Option<Instant>,
     sidebar_left_at: Option<Instant>,
+    settings_open: bool,
+    settings_section: SettingsSection,
+    auto_expand_sidebar: bool,
     terminal_limit_popup: bool,
     close_requested: bool,
     shutdown_requested: bool,
@@ -778,6 +790,12 @@ impl AdeApp {
                 update_state = AppUpdateState::Idle;
             }
         }
+        let persisted_ui = creation_context
+            .storage
+            .and_then(|storage| {
+                eframe::get_value::<PersistedUiSettings>(storage, UI_SETTINGS_STORAGE_KEY)
+            })
+            .unwrap_or_default();
         let mut app = Self {
             workspaces: Vec::new(),
             active_workspace: 0,
@@ -791,6 +809,9 @@ impl AdeApp {
             sidebar_open: false,
             sidebar_hover_started: None,
             sidebar_left_at: None,
+            settings_open: false,
+            settings_section: SettingsSection::General,
+            auto_expand_sidebar: persisted_ui.auto_expand_sidebar,
             terminal_limit_popup: false,
             close_requested: false,
             shutdown_requested: false,
@@ -1356,6 +1377,7 @@ impl AdeApp {
 
         let mut action = None;
         let mut create_workspace = false;
+        let mut open_settings = false;
         let tablet = root_ui.available_width() <= 960.0;
         let expanded_width = if tablet {
             TABLET_SIDEBAR_WIDTH
@@ -1380,14 +1402,16 @@ impl AdeApp {
             )
             .show(root_ui, |ui| {
                 if sidebar_width < 144.0 {
-                    compact_sidebar_rail(
+                    let compact_result = compact_sidebar_rail(
                         ui,
                         &self.workspaces,
                         self.active_workspace,
-                        &mut action,
-                        &mut context_menu_open,
-                        &mut create_workspace,
+                        self.settings_open,
                     );
+                    action = compact_result.action;
+                    context_menu_open = compact_result.context_menu_open;
+                    create_workspace = compact_result.create_workspace;
+                    open_settings = compact_result.open_settings;
                     return;
                 }
                 let (header_rect, _) = ui.allocate_exact_size(
@@ -1421,16 +1445,40 @@ impl AdeApp {
                         bottom: 8,
                     })
                     .show(ui, |ui| {
-                        for (index, workspace) in self.workspaces.iter().enumerate() {
-                            if let Some(next) = workspace_row(
-                                ui,
-                                workspace,
-                                index,
-                                index == self.active_workspace,
-                                &mut context_menu_open,
-                            ) {
-                                action = Some(next);
-                            }
+                        let list_height = (ui.available_height() - 48.0).max(0.0);
+                        ui.allocate_ui_with_layout(
+                            Vec2::new(ui.available_width(), list_height),
+                            egui::Layout::top_down(egui::Align::Min),
+                            |ui| {
+                                egui::ScrollArea::vertical()
+                                    .auto_shrink([false, false])
+                                    .show(ui, |ui| {
+                                        for (index, workspace) in self.workspaces.iter().enumerate()
+                                        {
+                                            if let Some(next) = workspace_row(
+                                                ui,
+                                                workspace,
+                                                index,
+                                                index == self.active_workspace,
+                                                &mut context_menu_open,
+                                            ) {
+                                                action = Some(next);
+                                            }
+                                        }
+                                    });
+                            },
+                        );
+                        ui.painter().hline(
+                            ui.max_rect().x_range(),
+                            ui.cursor().top(),
+                            Stroke::new(1.0, border()),
+                        );
+                        ui.add_space(7.0);
+                        if sidebar_settings_button(ui, self.settings_open)
+                            .on_hover_text("Settings")
+                            .clicked()
+                        {
+                            open_settings = true;
                         }
                     });
             });
@@ -1446,6 +1494,9 @@ impl AdeApp {
         if create_workspace {
             self.request_new_workspace(context);
         }
+        if open_settings {
+            self.settings_open = true;
+        }
         self.handle_workspace_action(action);
     }
 
@@ -1456,6 +1507,12 @@ impl AdeApp {
         context: &egui::Context,
     ) {
         let now = Instant::now();
+        if !self.auto_expand_sidebar {
+            self.sidebar_open = false;
+            self.sidebar_hover_started = None;
+            self.sidebar_left_at = None;
+            return;
+        }
         if context_menu_open {
             self.sidebar_open = true;
             self.sidebar_left_at = None;
@@ -1496,6 +1553,7 @@ impl AdeApp {
     fn compact_workspace_bar(&mut self, root_ui: &mut egui::Ui, context: &egui::Context) {
         let mut action = None;
         let mut create_workspace = false;
+        let mut open_settings = false;
         egui::Panel::top("compact-workspace-bar")
             .exact_size(40.0)
             .frame(
@@ -1539,6 +1597,12 @@ impl AdeApp {
                         },
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if topbar_settings_button(ui, self.settings_open)
+                            .on_hover_text("Settings")
+                            .clicked()
+                        {
+                            open_settings = true;
+                        }
                         if compact_icon_button(ui, "+", "New workspace")
                             .on_hover_text("New workspace")
                             .clicked()
@@ -1551,6 +1615,9 @@ impl AdeApp {
 
         if create_workspace {
             self.request_new_workspace(context);
+        }
+        if open_settings {
+            self.settings_open = true;
         }
         self.handle_workspace_action(action);
     }
@@ -1610,6 +1677,167 @@ impl AdeApp {
         } else if cancel_rename || context.input(|input| input.key_pressed(Key::Escape)) {
             self.rename_workspace = None;
         }
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn settings_page(&mut self, context: &egui::Context) {
+        if self.settings_open
+            && context.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Escape))
+        {
+            self.settings_open = false;
+        }
+        let reveal = context.animate_bool_with_time_and_easing(
+            egui::Id::new("settings-page-reveal"),
+            self.settings_open,
+            0.18,
+            egui::emath::easing::cubic_out,
+        );
+        if !self.settings_open && reveal <= 0.001 {
+            return;
+        }
+
+        let content_rect = context.content_rect();
+        let backdrop = egui::Area::new(egui::Id::new("settings-page-backdrop"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(content_rect.min)
+            .show(context, |ui| {
+                let (rect, response) = ui.allocate_exact_size(content_rect.size(), Sense::click());
+                ui.painter().rect_filled(
+                    rect,
+                    0.0,
+                    Color32::from_black_alpha(162).gamma_multiply(reveal),
+                );
+                response
+            })
+            .inner;
+        if backdrop.clicked() {
+            self.settings_open = false;
+        }
+
+        let final_width = (content_rect.width() - 56.0).clamp(320.0, 920.0);
+        let final_height = (content_rect.height() - 64.0).clamp(300.0, 640.0);
+        let panel_width = egui::lerp(final_width * 0.985..=final_width, reveal);
+        let panel_height = egui::lerp(final_height * 0.985..=final_height, reveal);
+        egui::Area::new(egui::Id::new("settings-page"))
+            .order(egui::Order::Foreground)
+            .pivot(egui::Align2::CENTER_CENTER)
+            .fixed_pos(content_rect.center())
+            .show(context, |ui| {
+                ui.set_width(panel_width);
+                ui.set_height(panel_height);
+                egui::Frame::NONE
+                    .fill(vercel_bg())
+                    .stroke(Stroke::new(1.0, vercel_border()))
+                    .corner_radius(8.0)
+                    .shadow(egui::epaint::Shadow {
+                        offset: [0, 16],
+                        blur: 40,
+                        spread: 0,
+                        color: Color32::from_black_alpha(190).gamma_multiply(reveal),
+                    })
+                    .inner_margin(egui::Margin::same(0))
+                    .show(ui, |ui| {
+                        ui.set_opacity(reveal);
+                        ui.set_min_size(Vec2::new(panel_width, panel_height));
+                        let header_height = 58.0;
+                        let (header_rect, _) = ui.allocate_exact_size(
+                            Vec2::new(panel_width, header_height),
+                            Sense::hover(),
+                        );
+                        ui.painter().text(
+                            header_rect.left_center() + Vec2::new(24.0, 0.0),
+                            egui::Align2::LEFT_CENTER,
+                            "Settings",
+                            FontId::proportional(20.0),
+                            vercel_text_primary(),
+                        );
+                        let close_rect = egui::Rect::from_center_size(
+                            header_rect.right_center() - Vec2::new(24.0, 0.0),
+                            Vec2::splat(28.0),
+                        );
+                        let close = ui.interact(
+                            close_rect,
+                            egui::Id::new("settings-page-close"),
+                            Sense::click(),
+                        );
+                        close.widget_info(|| {
+                            egui::WidgetInfo::labeled(
+                                egui::WidgetType::Button,
+                                ui.is_enabled(),
+                                "Close settings",
+                            )
+                        });
+                        if close.hovered() || close.has_focus() {
+                            ui.painter()
+                                .rect_filled(close_rect, 6.0, vercel_surface_hover());
+                            ui.painter().rect_stroke(
+                                close_rect,
+                                6.0,
+                                Stroke::new(1.0, vercel_border()),
+                                egui::StrokeKind::Inside,
+                            );
+                        }
+                        paint_close_icon(
+                            ui.painter(),
+                            close_rect.center(),
+                            vercel_text_secondary(),
+                        );
+                        if close.clicked() {
+                            self.settings_open = false;
+                        }
+
+                        ui.painter().hline(
+                            header_rect.x_range(),
+                            header_rect.bottom(),
+                            Stroke::new(1.0, vercel_border()),
+                        );
+
+                        let body_height = (panel_height - header_height).max(0.0);
+                        let (body_rect, _) = ui.allocate_exact_size(
+                            Vec2::new(panel_width, body_height),
+                            Sense::hover(),
+                        );
+                        let sidebar_width = 204.0_f32.min(panel_width * 0.34);
+                        let sidebar_rect = egui::Rect::from_min_max(
+                            body_rect.min,
+                            egui::pos2(body_rect.left() + sidebar_width, body_rect.bottom()),
+                        );
+                        ui.painter().vline(
+                            sidebar_rect.right(),
+                            body_rect.y_range(),
+                            Stroke::new(1.0, vercel_border()),
+                        );
+                        let mut sidebar = ui.new_child(
+                            egui::UiBuilder::new()
+                                .max_rect(sidebar_rect.shrink2(Vec2::new(18.0, 22.0)))
+                                .layout(egui::Layout::top_down(egui::Align::Min)),
+                        );
+                        for section in SettingsSection::ALL {
+                            let response = settings_nav_item(
+                                &mut sidebar,
+                                section.label(),
+                                section == self.settings_section,
+                            );
+                            if response.clicked() {
+                                self.settings_section = section;
+                            }
+                        }
+                        let content_rect = egui::Rect::from_min_max(
+                            egui::pos2(sidebar_rect.right(), body_rect.top()),
+                            body_rect.max,
+                        );
+                        let mut settings_content = ui.new_child(
+                            egui::UiBuilder::new()
+                                .max_rect(content_rect.shrink2(Vec2::new(28.0, 24.0)))
+                                .layout(egui::Layout::top_down(egui::Align::Min)),
+                        );
+                        settings_section_content(
+                            &mut settings_content,
+                            self.settings_section,
+                            &mut self.auto_expand_sidebar,
+                        );
+                    });
+            });
     }
 
     #[allow(clippy::too_many_lines)]
@@ -1935,6 +2163,16 @@ impl AdeApp {
 }
 
 impl eframe::App for AdeApp {
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        eframe::set_value(
+            storage,
+            UI_SETTINGS_STORAGE_KEY,
+            &PersistedUiSettings {
+                auto_expand_sidebar: self.auto_expand_sidebar,
+            },
+        );
+    }
+
     fn raw_input_hook(&mut self, _context: &egui::Context, input: &mut egui::RawInput) {
         let shortcut_down = input.focused && paste_shortcut_is_down(input.modifiers);
         let has_text_paste = input
@@ -1943,6 +2181,7 @@ impl eframe::App for AdeApp {
             .any(|event| matches!(event, egui::Event::Paste(_)));
         let terminal_accepts_input = !self.palette_open
             && self.rename_workspace.is_none()
+            && !self.settings_open
             && self
                 .workspaces
                 .get(self.active_workspace)
@@ -1996,7 +2235,8 @@ impl eframe::App for AdeApp {
         }
 
         let requests = self.client.as_ref().map(|client| client.requests.clone());
-        let terminal_input_enabled = !self.palette_open && self.rename_workspace.is_none();
+        let terminal_input_enabled =
+            !self.palette_open && self.rename_workspace.is_none() && !self.settings_open;
         let mut updated_layout = None;
         let mut create_terminal = None;
         egui::CentralPanel::default()
@@ -2073,6 +2313,7 @@ impl eframe::App for AdeApp {
         self.show_terminal_limit_popup(&context);
         self.show_close_confirmation(&context);
         self.workspace_dialogs(&context);
+        self.settings_page(&context);
         self.command_palette(&context);
         // Terminal output and user input request repaints immediately. A slow idle tick is enough
         // for background metadata and avoids rebuilding a full terminal grid 30 times per second.
@@ -2391,6 +2632,18 @@ fn paint_codex_mark(ui: &mut egui::Ui, available_rect: egui::Rect, color: Color3
     );
 }
 
+fn paint_close_icon(painter: &egui::Painter, center: egui::Pos2, color: Color32) {
+    let stroke = Stroke::new(1.0, color);
+    painter.line_segment(
+        [center - Vec2::splat(4.0), center + Vec2::splat(4.0)],
+        stroke,
+    );
+    painter.line_segment(
+        [center + Vec2::new(-4.0, 4.0), center + Vec2::new(4.0, -4.0)],
+        stroke,
+    );
+}
+
 fn window_control_button(
     ui: &mut egui::Ui,
     control: WindowControl,
@@ -2447,14 +2700,7 @@ fn window_control_button(
             );
         }
         WindowControl::Close => {
-            ui.painter().line_segment(
-                [center - Vec2::splat(4.0), center + Vec2::splat(4.0)],
-                stroke,
-            );
-            ui.painter().line_segment(
-                [center + Vec2::new(-4.0, 4.0), center + Vec2::new(4.0, -4.0)],
-                stroke,
-            );
+            paint_close_icon(ui.painter(), center, text_primary());
         }
     }
     response
@@ -2856,6 +3102,32 @@ enum WorkspaceAction {
     Close(ade_core::WorkspaceId),
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum SettingsSection {
+    General,
+    Appearance,
+    Keyboard,
+    Advanced,
+}
+
+impl SettingsSection {
+    const ALL: [Self; 4] = [
+        Self::General,
+        Self::Appearance,
+        Self::Keyboard,
+        Self::Advanced,
+    ];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::General => "General",
+            Self::Appearance => "Appearance",
+            Self::Keyboard => "Keyboard",
+            Self::Advanced => "Advanced",
+        }
+    }
+}
+
 struct WorkspaceState {
     model: Workspace,
     panes: HashMap<PaneId, TerminalPane>,
@@ -2876,14 +3148,25 @@ impl WorkspaceState {
     }
 }
 
+struct CompactSidebarResult {
+    action: Option<WorkspaceAction>,
+    context_menu_open: bool,
+    create_workspace: bool,
+    open_settings: bool,
+}
+
 fn compact_sidebar_rail(
     ui: &mut egui::Ui,
     workspaces: &[WorkspaceState],
     active_workspace: usize,
-    action: &mut Option<WorkspaceAction>,
-    context_menu_open: &mut bool,
-    create_workspace: &mut bool,
-) {
+    settings_open: bool,
+) -> CompactSidebarResult {
+    let mut result = CompactSidebarResult {
+        action: None,
+        context_menu_open: false,
+        create_workspace: false,
+        open_settings: false,
+    };
     let (header_rect, _) = ui.allocate_exact_size(
         Vec2::new(ui.available_width(), WINDOW_TITLE_BAR_HEIGHT),
         Sense::hover(),
@@ -2895,21 +3178,40 @@ fn compact_sidebar_rail(
         .on_hover_text("New workspace")
         .clicked()
     {
-        *create_workspace = true;
+        result.create_workspace = true;
     }
     ui.add_space(6.0);
 
-    for (index, workspace) in workspaces.iter().enumerate() {
-        if let Some(next) = compact_workspace_item(
-            ui,
-            workspace,
-            index,
-            index == active_workspace,
-            context_menu_open,
-        ) {
-            *action = Some(next);
-        }
+    let list_height = (ui.available_height() - 48.0).max(0.0);
+    ui.allocate_ui_with_layout(
+        Vec2::new(ui.available_width(), list_height),
+        egui::Layout::top_down(egui::Align::Center),
+        |ui| {
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    for (index, workspace) in workspaces.iter().enumerate() {
+                        if let Some(next) = compact_workspace_item(
+                            ui,
+                            workspace,
+                            index,
+                            index == active_workspace,
+                            &mut result.context_menu_open,
+                        ) {
+                            result.action = Some(next);
+                        }
+                    }
+                });
+        },
+    );
+    ui.add_space(7.0);
+    if compact_sidebar_settings_button(ui, settings_open)
+        .on_hover_text("Settings")
+        .clicked()
+    {
+        result.open_settings = true;
     }
+    result
 }
 
 fn compact_workspace_item(
@@ -2960,11 +3262,9 @@ fn compact_workspace_item(
         },
     );
 
-    let response = response.on_hover_text(format!(
-        "{}\n{}",
-        workspace.model.name,
-        workspace.model.root_directory.display()
-    ));
+    if response.hovered() && !response.context_menu_opened() {
+        show_workspace_hover_card(ui, rect, workspace);
+    }
     let mut next = response.clicked().then_some(WorkspaceAction::Focus(index));
     if response.double_clicked() {
         next = Some(WorkspaceAction::Edit(
@@ -2975,6 +3275,188 @@ fn compact_workspace_item(
     workspace_context_menu(&response, workspace, &mut next);
     *context_menu_open |= response.context_menu_opened();
     next
+}
+
+#[allow(clippy::too_many_lines)]
+fn show_workspace_hover_card(ui: &egui::Ui, anchor: egui::Rect, workspace: &WorkspaceState) {
+    let context = ui.ctx();
+    let content_rect = context.content_rect();
+    let width = 326.0_f32.min((content_rect.width() - anchor.right() - 16.0).max(224.0));
+    let height = 128.0;
+    let mut position = egui::pos2(anchor.right() + 10.0, anchor.top() - 2.0);
+    if position.x + width > content_rect.right() - 8.0 {
+        position.x = anchor.left() - width - 10.0;
+    }
+    if position.y + height > content_rect.bottom() - 8.0 {
+        position.y = content_rect.bottom() - height - 8.0;
+    }
+    position.y = position.y.max(content_rect.top() + 8.0);
+
+    let summary = workspace_hover_summary(workspace);
+    egui::Area::new(egui::Id::new(("workspace-hover-card", workspace.model.id)))
+        .order(egui::Order::Tooltip)
+        .fixed_pos(position)
+        .show(context, |ui| {
+            ui.set_width(width);
+            ui.set_height(height);
+            egui::Frame::NONE
+                .fill(Color32::from_rgb(10, 10, 10))
+                .stroke(Stroke::new(1.0, vercel_border()))
+                .corner_radius(10.0)
+                .shadow(egui::epaint::Shadow {
+                    offset: [0, 10],
+                    blur: 32,
+                    spread: 0,
+                    color: Color32::from_black_alpha(210),
+                })
+                .inner_margin(egui::Margin::same(0))
+                .show(ui, |ui| {
+                    ui.set_min_size(Vec2::new(width, height));
+                    let inner = ui.max_rect().shrink2(Vec2::new(14.0, 16.0));
+                    let painter = ui.painter().with_clip_rect(inner);
+                    let title_y = inner.top() + 10.0;
+                    paint_hover_folder_icon(
+                        &painter,
+                        egui::pos2(inner.left() + 8.0, title_y),
+                        vercel_text_secondary(),
+                    );
+                    painter.text(
+                        egui::pos2(inner.left() + 28.0, title_y),
+                        egui::Align2::LEFT_CENTER,
+                        compact_text(&workspace.model.name, 30),
+                        FontId::proportional(13.5),
+                        vercel_text_primary(),
+                    );
+
+                    let terminals_y = title_y + 27.0;
+                    paint_hover_terminal_icon(
+                        &painter,
+                        egui::pos2(inner.left() + 8.0, terminals_y),
+                        vercel_text_secondary(),
+                    );
+                    painter.text(
+                        egui::pos2(inner.left() + 28.0, terminals_y),
+                        egui::Align2::LEFT_CENTER,
+                        format!(
+                            "{} {}",
+                            summary.active_terminals,
+                            pluralize("terminal", summary.active_terminals)
+                        ),
+                        FontId::proportional(12.8),
+                        vercel_text_primary(),
+                    );
+                    let codex_rect = egui::Rect::from_center_size(
+                        egui::pos2(inner.left() + 112.0, terminals_y),
+                        Vec2::splat(13.0),
+                    );
+                    paint_codex_mark(ui, codex_rect, vercel_text_secondary(), 0.82);
+                    painter.text(
+                        egui::pos2(codex_rect.right() + 5.0, terminals_y),
+                        egui::Align2::LEFT_CENTER,
+                        summary.codex_agents.to_string(),
+                        FontId::proportional(12.5),
+                        vercel_text_secondary(),
+                    );
+
+                    let opencode_rect = egui::Rect::from_center_size(
+                        egui::pos2(inner.left() + 164.0, terminals_y),
+                        Vec2::splat(13.0),
+                    );
+                    paint_opencode_mark(ui, opencode_rect);
+                    painter.text(
+                        egui::pos2(opencode_rect.right() + 5.0, terminals_y),
+                        egui::Align2::LEFT_CENTER,
+                        summary.opencode_agents.to_string(),
+                        FontId::proportional(12.5),
+                        vercel_text_secondary(),
+                    );
+
+                    let first_divider_y = terminals_y + 22.0;
+                    painter.hline(
+                        inner.x_range(),
+                        first_divider_y,
+                        Stroke::new(1.0, vercel_border()),
+                    );
+
+                    let path_y = first_divider_y + 28.0;
+                    paint_hover_path_icon(
+                        &painter,
+                        egui::pos2(inner.left() + 8.0, path_y),
+                        vercel_text_secondary(),
+                    );
+                    painter.text(
+                        egui::pos2(inner.left() + 28.0, path_y),
+                        egui::Align2::LEFT_CENTER,
+                        compact_text(&workspace.model.root_directory.display().to_string(), 44),
+                        FontId::proportional(12.8),
+                        vercel_text_primary(),
+                    );
+                });
+        });
+}
+
+struct WorkspaceHoverSummary {
+    active_terminals: usize,
+    codex_agents: usize,
+    opencode_agents: usize,
+}
+
+fn workspace_hover_summary(workspace: &WorkspaceState) -> WorkspaceHoverSummary {
+    let mut summary = WorkspaceHoverSummary {
+        active_terminals: 0,
+        codex_agents: 0,
+        opencode_agents: 0,
+    };
+    for pane in workspace.panes.values() {
+        if !matches!(
+            pane.status,
+            SessionStatus::Starting | SessionStatus::Running
+        ) {
+            continue;
+        }
+        summary.active_terminals += 1;
+        match pane_agent_kind(pane) {
+            Some(AgentKind::Codex) => summary.codex_agents += 1,
+            Some(AgentKind::OpenCode) => summary.opencode_agents += 1,
+            None => {}
+        }
+    }
+    summary
+}
+
+enum AgentKind {
+    Codex,
+    OpenCode,
+}
+
+fn pane_agent_kind(pane: &TerminalPane) -> Option<AgentKind> {
+    let label = pane.process_label.to_ascii_lowercase();
+    if agent_text_matches_opencode(&label) {
+        Some(AgentKind::OpenCode)
+    } else if agent_text_matches_codex(&label) {
+        Some(AgentKind::Codex)
+    } else {
+        None
+    }
+}
+
+fn agent_text_matches_opencode(text: &str) -> bool {
+    text.contains("opencode") || text.contains("open-code") || text.contains("open code")
+}
+
+fn agent_text_matches_codex(text: &str) -> bool {
+    text.contains("openai codex") || text.contains(" codex") || text.starts_with("codex")
+}
+
+fn pluralize(word: &'static str, count: usize) -> &'static str {
+    if count == 1 {
+        word
+    } else {
+        match word {
+            "terminal" => "terminals",
+            _ => word,
+        }
+    }
 }
 
 fn paint_workspace_icon(ui: &egui::Ui, rect: egui::Rect, workspace: &WorkspaceState) {
@@ -3252,6 +3734,302 @@ fn menu_item(
     response
 }
 
+fn settings_nav_item(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Response {
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), 34.0), Sense::click());
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, selected, label)
+    });
+    if selected || response.hovered() || response.has_focus() {
+        let fill = if selected {
+            vercel_surface()
+        } else {
+            vercel_surface_hover()
+        };
+        ui.painter()
+            .rect_filled(rect.shrink2(Vec2::new(0.0, 1.0)), 6.0, fill);
+        ui.painter().rect_stroke(
+            rect.shrink2(Vec2::new(0.0, 1.0)),
+            6.0,
+            Stroke::new(1.0, vercel_border()),
+            egui::StrokeKind::Inside,
+        );
+    }
+    ui.painter().text(
+        rect.left_center() + Vec2::new(11.0, 0.0),
+        egui::Align2::LEFT_CENTER,
+        label,
+        FontId::proportional(13.0),
+        if selected {
+            vercel_text_primary()
+        } else {
+            vercel_text_secondary()
+        },
+    );
+    response
+}
+
+fn settings_section_content(
+    ui: &mut egui::Ui,
+    section: SettingsSection,
+    auto_expand_sidebar: &mut bool,
+) {
+    if !matches!(section, SettingsSection::General) {
+        return;
+    }
+
+    ui.label(
+        RichText::new("Sidebar")
+            .font(FontId::proportional(14.0))
+            .strong()
+            .color(vercel_text_primary()),
+    );
+    ui.add_space(12.0);
+    settings_toggle_row(
+        ui,
+        "Auto expand sidebar",
+        "When enabled, hovering the collapsed sidebar opens the full workspace list.",
+        auto_expand_sidebar,
+    );
+}
+
+fn settings_toggle_row(
+    ui: &mut egui::Ui,
+    title: &str,
+    description: &str,
+    value: &mut bool,
+) -> egui::Response {
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), 72.0), Sense::click());
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Checkbox, true, *value, title)
+    });
+    if response.clicked() {
+        *value = !*value;
+    }
+
+    let row_rect = rect.shrink2(Vec2::new(0.0, 1.0));
+    ui.painter().rect_filled(row_rect, 8.0, vercel_surface());
+    ui.painter().rect_stroke(
+        row_rect,
+        8.0,
+        Stroke::new(
+            1.0,
+            if response.hovered() {
+                border_hover()
+            } else {
+                vercel_border()
+            },
+        ),
+        egui::StrokeKind::Inside,
+    );
+
+    let text_x = row_rect.left() + 16.0;
+    let text_clip = egui::Rect::from_min_max(
+        egui::pos2(row_rect.left() + 12.0, row_rect.top()),
+        egui::pos2(row_rect.right() - 74.0, row_rect.bottom()),
+    );
+    let painter = ui.painter().with_clip_rect(text_clip);
+    painter.text(
+        egui::pos2(text_x, row_rect.top() + 22.0),
+        egui::Align2::LEFT_CENTER,
+        title,
+        FontId::proportional(14.0),
+        vercel_text_primary(),
+    );
+    painter.text(
+        egui::pos2(text_x, row_rect.top() + 45.0),
+        egui::Align2::LEFT_CENTER,
+        description,
+        FontId::proportional(12.5),
+        vercel_text_secondary(),
+    );
+
+    let toggle_rect = egui::Rect::from_center_size(
+        egui::pos2(row_rect.right() - 34.0, row_rect.center().y),
+        Vec2::new(38.0, 22.0),
+    );
+    paint_vercel_toggle(ui.painter(), toggle_rect, *value);
+    response
+}
+
+fn paint_vercel_toggle(painter: &egui::Painter, rect: egui::Rect, enabled: bool) {
+    let fill = if enabled {
+        vercel_text_primary()
+    } else {
+        vercel_surface_hover()
+    };
+    let stroke = if enabled {
+        vercel_text_primary()
+    } else {
+        vercel_border()
+    };
+    painter.rect_filled(rect, 11.0, fill);
+    painter.rect_stroke(
+        rect,
+        11.0,
+        Stroke::new(1.0, stroke),
+        egui::StrokeKind::Inside,
+    );
+    let knob_x = if enabled {
+        rect.right() - 11.0
+    } else {
+        rect.left() + 11.0
+    };
+    painter.circle_filled(
+        egui::pos2(knob_x, rect.center().y),
+        7.0,
+        if enabled {
+            vercel_bg()
+        } else {
+            vercel_text_secondary()
+        },
+    );
+}
+
+fn sidebar_settings_button(ui: &mut egui::Ui, active: bool) -> egui::Response {
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), 32.0), Sense::click());
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), "Settings")
+    });
+    let button_rect = egui::Rect::from_min_size(rect.left_top(), Vec2::splat(32.0));
+    if active || response.hovered() || response.has_focus() {
+        ui.painter().rect_filled(
+            button_rect,
+            6.0,
+            if active {
+                surface_active()
+            } else {
+                surface_hover()
+            },
+        );
+    }
+    paint_settings_gear(ui, button_rect, text_secondary(), 15.0);
+    response
+}
+
+fn compact_sidebar_settings_button(ui: &mut egui::Ui, active: bool) -> egui::Response {
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), 34.0), Sense::click());
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), "Settings")
+    });
+    let button_rect = egui::Rect::from_center_size(rect.center(), Vec2::splat(30.0));
+    if active || response.hovered() || response.has_focus() {
+        ui.painter().rect_filled(
+            button_rect,
+            6.0,
+            if active {
+                surface_active()
+            } else {
+                surface_hover()
+            },
+        );
+    }
+    paint_settings_gear(ui, button_rect, text_secondary(), 15.0);
+    response
+}
+
+fn topbar_settings_button(ui: &mut egui::Ui, active: bool) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(24.0), Sense::click());
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), "Settings")
+    });
+    if active || response.hovered() || response.has_focus() {
+        ui.painter().rect_filled(
+            rect,
+            6.0,
+            if active {
+                surface_active()
+            } else {
+                surface_hover()
+            },
+        );
+    }
+    paint_settings_gear(ui, rect, text_secondary(), 14.0);
+    response
+}
+
+fn paint_settings_gear(ui: &mut egui::Ui, available_rect: egui::Rect, color: Color32, size: f32) {
+    let icon_rect = egui::Rect::from_center_size(available_rect.center(), Vec2::splat(size));
+    ui.put(
+        icon_rect,
+        egui::Image::from_bytes("bytes://termy/settings-gear.svg", SETTINGS_GEAR_SVG)
+            .tint(color)
+            .sense(Sense::hover()),
+    );
+}
+
+fn paint_opencode_mark(ui: &mut egui::Ui, available_rect: egui::Rect) {
+    ui.put(
+        available_rect,
+        egui::Image::from_bytes("bytes://opencode/logo-square.svg", OPENCODE_LOGO_SVG)
+            .sense(Sense::hover()),
+    );
+}
+
+fn paint_hover_folder_icon(painter: &egui::Painter, center: egui::Pos2, color: Color32) {
+    let rect = egui::Rect::from_center_size(center, Vec2::new(14.0, 11.0));
+    let stroke = Stroke::new(1.1, color);
+    painter.line_segment(
+        [
+            egui::pos2(rect.left(), rect.top() + 2.5),
+            egui::pos2(rect.left() + 5.0, rect.top() + 2.5),
+        ],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            egui::pos2(rect.left() + 5.0, rect.top() + 2.5),
+            egui::pos2(rect.left() + 7.0, rect.top() + 4.5),
+        ],
+        stroke,
+    );
+    painter.rect_stroke(
+        egui::Rect::from_min_max(
+            egui::pos2(rect.left(), rect.top() + 4.0),
+            egui::pos2(rect.right(), rect.bottom()),
+        ),
+        2.0,
+        stroke,
+        egui::StrokeKind::Inside,
+    );
+}
+
+fn paint_hover_terminal_icon(painter: &egui::Painter, center: egui::Pos2, color: Color32) {
+    let stroke = Stroke::new(1.1, color);
+    let rect = egui::Rect::from_center_size(center, Vec2::new(14.0, 12.0));
+    painter.rect_stroke(rect, 3.0, stroke, egui::StrokeKind::Inside);
+    painter.line_segment(
+        [
+            egui::pos2(rect.left() + 3.0, rect.center().y),
+            egui::pos2(rect.left() + 5.0, rect.center().y + 2.0),
+        ],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            egui::pos2(rect.left() + 3.0, rect.center().y + 4.0),
+            egui::pos2(rect.left() + 8.0, rect.center().y + 4.0),
+        ],
+        stroke,
+    );
+}
+
+fn paint_hover_path_icon(painter: &egui::Painter, center: egui::Pos2, color: Color32) {
+    let stroke = Stroke::new(1.1, color);
+    let rect = egui::Rect::from_center_size(center, Vec2::splat(13.0));
+    painter.rect_stroke(rect, 2.0, stroke, egui::StrokeKind::Inside);
+    painter.line_segment(
+        [
+            egui::pos2(rect.left() + 2.0, rect.top() + 4.0),
+            egui::pos2(rect.right() - 2.0, rect.top() + 4.0),
+        ],
+        stroke,
+    );
+}
+
 fn compact_icon_button(ui: &mut egui::Ui, icon: &str, label: &str) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(24.0), Sense::click());
     response.widget_info(|| {
@@ -3330,6 +4108,7 @@ fn modal_danger_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
 
 struct TerminalPane {
     id: PaneId,
+    process_label: String,
     parser: vt100::Parser,
     status: SessionStatus,
     columns: u16,
@@ -3409,6 +4188,7 @@ impl TerminalPane {
         let (git_result_sender, git_results) = unbounded();
         Self {
             id: metadata.id,
+            process_label: metadata.process_label.clone(),
             parser: vt100::Parser::new(metadata.rows, metadata.cols, SCROLLBACK_LINES),
             status: metadata.status.clone(),
             columns: metadata.cols,
@@ -3445,6 +4225,7 @@ impl TerminalPane {
 
     fn update_metadata(&mut self, metadata: &PaneSnapshot) {
         self.status = metadata.status.clone();
+        self.process_label.clone_from(&metadata.process_label);
         if self.cwd != metadata.cwd {
             self.cwd.clone_from(&metadata.cwd);
             self.git_status = None;
@@ -5106,6 +5887,30 @@ fn terminal_background() -> Color32 {
     Color32::BLACK
 }
 
+fn vercel_bg() -> Color32 {
+    Color32::BLACK
+}
+
+fn vercel_surface() -> Color32 {
+    Color32::from_rgb(17, 17, 17)
+}
+
+fn vercel_surface_hover() -> Color32 {
+    Color32::from_rgb(24, 24, 24)
+}
+
+fn vercel_text_primary() -> Color32 {
+    Color32::from_rgb(250, 250, 250)
+}
+
+fn vercel_text_secondary() -> Color32 {
+    Color32::from_rgb(136, 136, 136)
+}
+
+fn vercel_border() -> Color32 {
+    Color32::from_rgb(51, 51, 51)
+}
+
 fn surface_primary() -> Color32 {
     Color32::BLACK
 }
@@ -5892,6 +6697,76 @@ mod tests {
         assert!(palette_matches("Split Pane Right", "SPLIT"));
         assert!(!palette_matches("Close Workspace", "rename"));
         assert!(palette_matches("Close Workspace", ""));
+    }
+
+    #[test]
+    fn workspace_hover_summary_counts_active_agent_terminals() {
+        let mut workspace = Workspace::new("my-ADE", PathBuf::from(r"D:\NimsWorkspace\my-ADE"));
+        workspace.layout = LayoutNode::Empty;
+        workspace.active_pane_id = None;
+        let mut panes = HashMap::new();
+        for (label, status) in [
+            ("codex.exe", SessionStatus::Running),
+            ("opencode", SessionStatus::Starting),
+            ("pwsh.exe", SessionStatus::Running),
+            ("codex.exe", SessionStatus::Exited { exit_code: 0 }),
+        ] {
+            let metadata = PaneSnapshot {
+                id: PaneId::new(),
+                workspace_id: workspace.id,
+                cwd: workspace.root_directory.clone(),
+                process_label: label.to_owned(),
+                cols: 80,
+                rows: 24,
+                status,
+            };
+            panes.insert(metadata.id, TerminalPane::new(&metadata));
+        }
+        let state = WorkspaceState {
+            model: workspace,
+            panes,
+        };
+
+        let summary = workspace_hover_summary(&state);
+
+        assert_eq!(summary.active_terminals, 3);
+        assert_eq!(summary.codex_agents, 1);
+        assert_eq!(summary.opencode_agents, 1);
+    }
+
+    #[test]
+    fn workspace_hover_summary_ignores_stale_terminal_text() {
+        let mut workspace = Workspace::new("my-ADE", PathBuf::from(r"D:\NimsWorkspace\my-ADE"));
+        workspace.layout = LayoutNode::Empty;
+        workspace.active_pane_id = None;
+        let mut panes = HashMap::new();
+        for visible_text in [
+            ">_ OpenAI Codex (v0.145.0)\r\nmodel: gpt-5.5 high",
+            "opencode\r\nBuild MiMo V2.5 Free OpenCode Zen",
+        ] {
+            let metadata = PaneSnapshot {
+                id: PaneId::new(),
+                workspace_id: workspace.id,
+                cwd: workspace.root_directory.clone(),
+                process_label: "pwsh.exe".to_owned(),
+                cols: 80,
+                rows: 24,
+                status: SessionStatus::Running,
+            };
+            let mut pane = TerminalPane::new(&metadata);
+            pane.parser.process(visible_text.as_bytes());
+            panes.insert(metadata.id, pane);
+        }
+        let state = WorkspaceState {
+            model: workspace,
+            panes,
+        };
+
+        let summary = workspace_hover_summary(&state);
+
+        assert_eq!(summary.active_terminals, 2);
+        assert_eq!(summary.codex_agents, 0);
+        assert_eq!(summary.opencode_agents, 0);
     }
 
     #[test]
