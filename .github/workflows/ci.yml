@@ -76,6 +76,22 @@ jobs:
       - name: Set up compiler cache
         uses: mozilla-actions/sccache-action@1583d6b38d7be47f593cb472781bbb21cab4321e # v0.0.10
 
+      - name: Derive automatic release version
+        shell: pwsh
+        run: |
+          $cargoManifest = Get-Content -Raw Cargo.toml
+          $baseVersion = [regex]::Match(
+            $cargoManifest,
+            '(?ms)^\[workspace\.package\]\s*.*?^version\s*=\s*"(?<version>\d+\.\d+\.\d+)"'
+          ).Groups['version'].Value
+          if (-not $baseVersion) {
+            throw "Could not read workspace.package.version from Cargo.toml"
+          }
+          $parts = $baseVersion.Split('.')
+          $patch = ([int]$parts[2] * 100000) + [int]"${{ github.run_number }}"
+          $version = "$($parts[0]).$($parts[1]).$patch"
+          "TERMY_BUILD_VERSION=$version" >> $env:GITHUB_ENV
+
       - name: Build release executable
         run: cargo build --release --locked -p ade-app
 
