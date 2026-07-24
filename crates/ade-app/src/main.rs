@@ -431,6 +431,10 @@ fn official_build_version() -> Option<&'static str> {
     option_env!("TERMY_BUILD_VERSION")
 }
 
+fn current_app_version() -> &'static str {
+    official_build_version().unwrap_or(env!("CARGO_PKG_VERSION"))
+}
+
 fn configured_updater(
     current_version: &str,
     target_version: Option<&str>,
@@ -1822,6 +1826,7 @@ impl AdeApp {
                                 self.settings_section = section;
                             }
                         }
+                        paint_settings_version_footer(ui, sidebar_rect, current_app_version());
                         let content_rect = egui::Rect::from_min_max(
                             egui::pos2(sidebar_rect.right(), body_rect.top()),
                             body_rect.max,
@@ -3767,6 +3772,17 @@ fn settings_nav_item(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Re
         },
     );
     response
+}
+
+fn paint_settings_version_footer(ui: &egui::Ui, sidebar_rect: egui::Rect, version: &str) {
+    let text = format!("Version {version}");
+    ui.painter().text(
+        egui::pos2(sidebar_rect.left() + 29.0, sidebar_rect.bottom() - 24.0),
+        egui::Align2::LEFT_CENTER,
+        text,
+        FontId::proportional(12.0),
+        vercel_text_secondary(),
+    );
 }
 
 fn settings_section_content(
