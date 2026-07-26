@@ -149,6 +149,7 @@ struct TodoListState {
     draft: String,
     panel_hovered: bool,
     keep_open_until: Option<Instant>,
+    input_focused: bool,
 }
 
 impl TodoListState {
@@ -2396,8 +2397,10 @@ impl eframe::App for AdeApp {
         }
 
         let requests = self.client.as_ref().map(|client| client.requests.clone());
-        let terminal_input_enabled =
-            !self.palette_open && self.rename_workspace.is_none() && !self.settings_open;
+        let terminal_input_enabled = !self.palette_open
+            && self.rename_workspace.is_none()
+            && !self.settings_open
+            && !self.todos.input_focused;
         let mut updated_layout = None;
         let mut create_terminal = None;
         egui::CentralPanel::default()
@@ -2899,6 +2902,7 @@ fn header_focus_duration(secs: u64) -> String {
 }
 
 fn todo_list_button(ui: &mut egui::Ui, context: &egui::Context, todos: &mut TodoListState) {
+    todos.input_focused = false;
     let now = Instant::now();
     if todos.purge_completed(now) {
         context.request_repaint();
@@ -3109,6 +3113,9 @@ fn show_todo_add_row(ui: &mut egui::Ui, todos: &mut TodoListState) {
                         .frame(egui::Frame::NONE),
                 )
             });
+        if input.inner.has_focus() {
+            todos.input_focused = true;
+        }
         let add_clicked = todo_add_button(ui, disabled).clicked();
         if (add_clicked
             || (input.inner.lost_focus() && ui.input(|input| input.key_pressed(Key::Enter))))
