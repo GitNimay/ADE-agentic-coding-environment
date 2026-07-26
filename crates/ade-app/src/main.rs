@@ -2661,19 +2661,19 @@ fn paint_focus_header_label(ui: &mut egui::Ui, position: egui::Pos2, elapsed_sec
         (" ".to_owned(), FontId::proportional(13.5), text_primary()),
         (
             hours.to_string(),
-            FontId::monospace(14.0),
+            FontId::proportional(13.5),
             focus_hour_color(),
         ),
-        (":".to_owned(), FontId::monospace(13.5), text_secondary()),
+        (":".to_owned(), FontId::proportional(13.5), text_secondary()),
         (
             format!("{minutes:02}"),
-            FontId::monospace(14.0),
+            FontId::proportional(13.5),
             focus_minute_color(),
         ),
-        (":".to_owned(), FontId::monospace(13.5), text_secondary()),
+        (":".to_owned(), FontId::proportional(13.5), text_secondary()),
         (
             format!("{seconds:02}"),
-            FontId::monospace(14.0),
+            FontId::proportional(13.5),
             focus_second_color(),
         ),
     ];
