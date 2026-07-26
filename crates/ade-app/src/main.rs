@@ -46,6 +46,8 @@ const TERMINAL_CLOSE_DURATION: Duration = Duration::from_millis(220);
 const TERMINAL_CURSOR_STEADY_DURATION: Duration = Duration::from_millis(520);
 const TERMINAL_CURSOR_BLINK_PERIOD: Duration = Duration::from_millis(1_100);
 const TERMINAL_CURSOR_FRAME_INTERVAL: Duration = Duration::from_millis(16);
+const WORKSPACE_DITHER_FRAME_INTERVAL: Duration = Duration::from_millis(220);
+const AGENT_WORKING_OUTPUT_GRACE: Duration = Duration::from_millis(1_800);
 const SYNCHRONIZED_OUTPUT_TIMEOUT: Duration = Duration::from_millis(150);
 const SYNCHRONIZED_OUTPUT_LIMIT: usize = 1024 * 1024;
 const SYNCHRONIZED_OUTPUT_BEGIN: &[u8] = b"\x1b[?2026h";
@@ -101,14 +103,33 @@ enum AppUpdateState {
     },
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
 struct PersistedUiSettings {
     theme: AppTheme,
     auto_expand_sidebar: bool,
+    header_show_todos: bool,
+    header_show_focus_timer: bool,
+    header_show_chatgpt: bool,
     todos: Vec<PersistedTodoItem>,
     focus_best_secs: u64,
     focus_elapsed_secs: u64,
+}
+
+impl Default for PersistedUiSettings {
+    fn default() -> Self {
+        Self {
+            theme: AppTheme::default(),
+            auto_expand_sidebar: false,
+            header_show_todos: true,
+            header_show_focus_timer: true,
+            header_show_chatgpt: true,
+            todos: Vec::new(),
+            focus_best_secs: 0,
+            focus_elapsed_secs: 0,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -920,6 +941,9 @@ struct AdeApp {
     settings_section: SettingsSection,
     theme: AppTheme,
     auto_expand_sidebar: bool,
+    header_show_todos: bool,
+    header_show_focus_timer: bool,
+    header_show_chatgpt: bool,
     terminal_limit_popup: bool,
     close_requested: bool,
     shutdown_requested: bool,
@@ -985,6 +1009,9 @@ impl AdeApp {
             settings_section: SettingsSection::General,
             theme: persisted_ui.theme,
             auto_expand_sidebar: persisted_ui.auto_expand_sidebar,
+            header_show_todos: persisted_ui.header_show_todos,
+            header_show_focus_timer: persisted_ui.header_show_focus_timer,
+            header_show_chatgpt: persisted_ui.header_show_chatgpt,
             terminal_limit_popup: false,
             close_requested: false,
             shutdown_requested: false,
@@ -1978,6 +2005,9 @@ impl AdeApp {
                     self.settings_section,
                     &mut self.theme,
                     &mut self.auto_expand_sidebar,
+                    &mut self.header_show_todos,
+                    &mut self.header_show_focus_timer,
+                    &mut self.header_show_chatgpt,
                 );
             });
 
@@ -2316,6 +2346,9 @@ impl eframe::App for AdeApp {
             &PersistedUiSettings {
                 theme: self.theme,
                 auto_expand_sidebar: self.auto_expand_sidebar,
+                header_show_todos: self.header_show_todos,
+                header_show_focus_timer: self.header_show_focus_timer,
+                header_show_chatgpt: self.header_show_chatgpt,
                 todos: self.todos.persisted_items(),
                 focus_best_secs: self.focus.best_session_secs(Instant::now()),
                 focus_elapsed_secs: self.focus.persisted_elapsed_secs(),
@@ -2383,6 +2416,9 @@ impl eframe::App for AdeApp {
                 &mut self.codex_usage,
                 &mut self.todos,
                 &mut self.focus,
+                self.header_show_chatgpt,
+                self.header_show_todos,
+                self.header_show_focus_timer,
             );
             self.sidebar(ui, &context);
         } else {
@@ -2393,6 +2429,9 @@ impl eframe::App for AdeApp {
                 &mut self.codex_usage,
                 &mut self.todos,
                 &mut self.focus,
+                self.header_show_chatgpt,
+                self.header_show_todos,
+                self.header_show_focus_timer,
             );
         }
 
@@ -2492,12 +2531,16 @@ enum WindowControl {
     Close,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn window_title_bar(
     root_ui: &mut egui::Ui,
     context: &egui::Context,
     codex_usage: &mut CodexUsageMonitor,
     todos: &mut TodoListState,
     focus: &mut FocusTimerState,
+    show_chatgpt: bool,
+    show_todos: bool,
+    show_focus_timer: bool,
 ) {
     let maximized = context.input(|input| input.viewport().maximized.unwrap_or(false));
     let panel = egui::Panel::top("window-title-bar")
@@ -2514,10 +2557,18 @@ fn window_title_bar(
                 if window_control_button(ui, WindowControl::Minimize, maximized).clicked() {
                     context.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                 }
-                codex_usage.show(ui, context);
-                todo_list_button(ui, context, todos);
-                ui.add_space(-4.0);
-                focus_timer_button(ui, context, focus);
+                if show_chatgpt {
+                    codex_usage.show(ui, context);
+                }
+                if show_todos {
+                    todo_list_button(ui, context, todos);
+                }
+                if show_todos && show_focus_timer {
+                    ui.add_space(-4.0);
+                }
+                if show_focus_timer {
+                    focus_timer_button(ui, context, focus);
+                }
 
                 let drag_rect = ui.available_rect_before_wrap();
                 let drag = ui.interact(
@@ -4243,6 +4294,18 @@ fn workspace_hover_summary(workspace: &WorkspaceState) -> WorkspaceHoverSummary 
     summary
 }
 
+fn workspace_has_working_agent(workspace: &WorkspaceState) -> bool {
+    workspace.panes.values().any(|pane| {
+        matches!(
+            pane.status,
+            SessionStatus::Starting | SessionStatus::Running
+        ) && pane_agent_kind(pane).is_some()
+            && pane
+                .last_output_at
+                .is_some_and(|last_output| last_output.elapsed() <= AGENT_WORKING_OUTPUT_GRACE)
+    })
+}
+
 enum AgentKind {
     Codex,
     OpenCode,
@@ -4284,7 +4347,18 @@ fn paint_workspace_icon(ui: &egui::Ui, rect: egui::Rect, workspace: &WorkspaceSt
 
     let painter = ui.painter();
     let seed = workspace_identity_hash(workspace.model.id);
-    let pattern = workspace_dither_pattern(seed);
+    let pattern = if workspace_has_working_agent(workspace) {
+        ui.ctx()
+            .request_repaint_after(WORKSPACE_DITHER_FRAME_INTERVAL);
+        let frame = ui.input(|input| {
+            let elapsed = Duration::from_secs_f64(input.time.max(0.0));
+            u32::try_from(elapsed.as_millis() / WORKSPACE_DITHER_FRAME_INTERVAL.as_millis())
+                .unwrap_or(u32::MAX)
+        });
+        workspace_animated_dither_pattern(seed, frame)
+    } else {
+        workspace_dither_pattern(seed)
+    };
 
     // Keep the tile itself and every dither mark square. The grid is painted
     // directly at display scale so its edges stay crisp instead of being filtered.
@@ -4331,6 +4405,17 @@ fn workspace_identity_hash(workspace_id: ade_core::WorkspaceId) -> u32 {
 }
 
 fn workspace_dither_pattern(seed: u32) -> [Option<Color32>; 100] {
+    workspace_dither_pattern_for_frame(seed, None)
+}
+
+fn workspace_animated_dither_pattern(seed: u32, frame: u32) -> [Option<Color32>; 100] {
+    workspace_dither_pattern_for_frame(seed, Some(frame))
+}
+
+fn workspace_dither_pattern_for_frame(
+    seed: u32,
+    animation_frame: Option<u32>,
+) -> [Option<Color32>; 100] {
     const BAYER_4X4: [u8; 16] = [
         0, 8, 2, 10, //
         12, 4, 14, 6, //
@@ -4367,9 +4452,20 @@ fn workspace_dither_pattern(seed: u32) -> [Option<Color32>; 100] {
         for column in 0_u8..10 {
             let index = usize::from(row) * 10 + usize::from(column);
             let normalized_tone = (tones[index] - minimum) / range;
-            let bayer_index = usize::from((row % 4) * 4 + column % 4);
+            let (bayer_row, bayer_column) = if let Some(frame) = animation_frame {
+                (
+                    row.wrapping_add(((frame / 8) % 4) as u8),
+                    column.wrapping_add(((frame / 5) % 4) as u8),
+                )
+            } else {
+                (row, column)
+            };
+            let bayer_index = usize::from((bayer_row % 4) * 4 + bayer_column % 4);
             let ordered_threshold = (f32::from(BAYER_4X4[bayer_index]) + 0.5) / 16.0;
-            let score = normalized_tone - (0.12 + ordered_threshold * 0.84);
+            let animated_offset = animation_frame.map_or(0.0, |frame| {
+                workspace_dither_animation_offset(seed, column, row, frame)
+            });
+            let score = normalized_tone - (0.12 + ordered_threshold * 0.84 + animated_offset);
             if score > 0.0 {
                 pattern[index] = Some(PINK);
                 if score > highlight_score {
@@ -4382,6 +4478,39 @@ fn workspace_dither_pattern(seed: u32) -> [Option<Color32>; 100] {
 
     pattern[highlight_index] = Some(WHITE);
     pattern
+}
+
+fn workspace_dither_animation_offset(seed: u32, column: u8, row: u8, frame: u32) -> f32 {
+    let blink = (workspace_temporal_noise(seed, column, row, frame / 3) - 0.5) * 0.1;
+    let orbit_frame = u16::try_from(frame % 96).unwrap_or(0);
+    let direction = if seed & 1 == 0 { 1.0 } else { -1.0 };
+    let seed_phase = f32::from(seed.to_le_bytes()[1]) / 255.0 * std::f32::consts::TAU;
+    let phase = f32::from(orbit_frame) / 96.0 * std::f32::consts::TAU * direction + seed_phase;
+    let radius = 2.7 + f32::from(seed.to_le_bytes()[2] & 0x03) * 0.18;
+    let center_x = 4.5 + phase.cos() * radius + (phase * 2.3 + seed_phase).sin() * 0.45;
+    let center_y = 4.5 + phase.sin() * radius + (phase * 1.7 - seed_phase).cos() * 0.55;
+    let dx = f32::from(column) - center_x;
+    let dy = f32::from(row) - center_y;
+    let distance = (dx * dx + dy * dy).sqrt();
+    let orbit_bias = if distance < 1.15 {
+        -0.14
+    } else if distance < 2.1 {
+        -0.07
+    } else if distance > 4.2 {
+        0.03
+    } else {
+        0.0
+    };
+    (blink + orbit_bias).clamp(-0.18, 0.18)
+}
+
+fn workspace_temporal_noise(seed: u32, column: u8, row: u8, frame: u32) -> f32 {
+    let hash = mix_u32(
+        seed ^ frame.wrapping_mul(0x632b_e59b)
+            ^ u32::from(column).wrapping_mul(0x9e37_79b9)
+            ^ u32::from(row).wrapping_mul(0x85eb_ca6b),
+    );
+    f32::from(hash.to_le_bytes()[0]) / 255.0
 }
 
 fn workspace_value_noise(seed: u32, column: u8, row: u8, scale: u8) -> f32 {
@@ -4599,11 +4728,308 @@ fn paint_settings_version_footer(ui: &egui::Ui, sidebar_rect: egui::Rect, versio
     );
 }
 
+struct KeyboardShortcutEntry {
+    category: &'static str,
+    action: &'static str,
+    keys: &'static [&'static str],
+}
+
+const KEYBOARD_SHORTCUTS: &[KeyboardShortcutEntry] = &[
+    KeyboardShortcutEntry {
+        category: "Command Palette",
+        action: "Open command palette",
+        keys: &["Ctrl", "Shift", "P"],
+    },
+    KeyboardShortcutEntry {
+        category: "Command Palette",
+        action: "Open command palette",
+        keys: &["Ctrl", "K"],
+    },
+    KeyboardShortcutEntry {
+        category: "Pane Management",
+        action: "Split pane right",
+        keys: &["Ctrl", "Shift", "D"],
+    },
+    KeyboardShortcutEntry {
+        category: "Pane Management",
+        action: "Split pane down",
+        keys: &["Ctrl", "Shift", "E"],
+    },
+    KeyboardShortcutEntry {
+        category: "Pane Management",
+        action: "Close active pane",
+        keys: &["Ctrl", "Shift", "W"],
+    },
+    KeyboardShortcutEntry {
+        category: "Pane Management",
+        action: "Move focus to previous pane",
+        keys: &["Ctrl", "Alt", "\u{2190}"],
+    },
+    KeyboardShortcutEntry {
+        category: "Pane Management",
+        action: "Move focus to previous pane",
+        keys: &["Ctrl", "Alt", "\u{2191}"],
+    },
+    KeyboardShortcutEntry {
+        category: "Pane Management",
+        action: "Move focus to next pane",
+        keys: &["Ctrl", "Alt", "\u{2192}"],
+    },
+    KeyboardShortcutEntry {
+        category: "Pane Management",
+        action: "Move focus to next pane",
+        keys: &["Ctrl", "Alt", "\u{2193}"],
+    },
+    KeyboardShortcutEntry {
+        category: "Workspace Navigation",
+        action: "Next workspace",
+        keys: &["Ctrl", "PgDn"],
+    },
+    KeyboardShortcutEntry {
+        category: "Workspace Navigation",
+        action: "Previous workspace",
+        keys: &["Ctrl", "PgUp"],
+    },
+    KeyboardShortcutEntry {
+        category: "Workspace Navigation",
+        action: "Rename workspace",
+        keys: &["F2"],
+    },
+    KeyboardShortcutEntry {
+        category: "Terminal Focus",
+        action: "Focus terminal right",
+        keys: &["Ctrl", "Shift", "\u{2192}"],
+    },
+    KeyboardShortcutEntry {
+        category: "Terminal Focus",
+        action: "Focus terminal left",
+        keys: &["Ctrl", "Shift", "\u{2190}"],
+    },
+    KeyboardShortcutEntry {
+        category: "Terminal Focus",
+        action: "Focus terminal down",
+        keys: &["Ctrl", "Shift", "\u{2193}"],
+    },
+    KeyboardShortcutEntry {
+        category: "Terminal Focus",
+        action: "Focus terminal up",
+        keys: &["Ctrl", "Shift", "\u{2191}"],
+    },
+    KeyboardShortcutEntry {
+        category: "Terminal",
+        action: "Copy selected text",
+        keys: &["Ctrl", "C"],
+    },
+    KeyboardShortcutEntry {
+        category: "Terminal",
+        action: "Paste text",
+        keys: &["Ctrl", "V"],
+    },
+    KeyboardShortcutEntry {
+        category: "Terminal",
+        action: "Paste clipboard image",
+        keys: &["Ctrl", "Shift", "V"],
+    },
+    KeyboardShortcutEntry {
+        category: "Terminal",
+        action: "Paste text",
+        keys: &["Shift", "Ins"],
+    },
+];
+
+fn paint_kbd_keycap(ui: &mut egui::Ui, key: &str) {
+    let key_size = Vec2::new(
+        ui.painter()
+            .layout(
+                key.to_owned(),
+                FontId::monospace(11.0),
+                vercel_text_primary(),
+                f32::INFINITY,
+            )
+            .size()
+            .x
+            + 14.0,
+        22.0,
+    );
+    let (rect, _) = ui.allocate_exact_size(key_size, Sense::hover());
+    let fill = vercel_surface();
+    let stroke = Stroke::new(1.0, vercel_border());
+    ui.painter().rect_filled(rect, 4.0, fill);
+    ui.painter()
+        .rect_stroke(rect, 4.0, stroke, egui::StrokeKind::Inside);
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        key,
+        FontId::monospace(11.0),
+        vercel_text_primary(),
+    );
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn paint_keyboard_shortcuts_table(ui: &mut egui::Ui) {
+    ui.label(
+        RichText::new("Keyboard Shortcuts")
+            .font(FontId::proportional(14.0))
+            .strong()
+            .color(vercel_text_primary()),
+    );
+    ui.add_space(4.0);
+    ui.label(
+        RichText::new("A comprehensive reference of all available shortcuts.")
+            .font(FontId::proportional(12.5))
+            .color(vercel_text_secondary()),
+    );
+    ui.add_space(16.0);
+
+    let table_size = Vec2::new(ui.available_width(), ui.available_height().max(0.0));
+    egui::Frame::NONE
+        .fill(vercel_surface())
+        .stroke(Stroke::new(1.0, vercel_border()))
+        .corner_radius(8.0)
+        .inner_margin(egui::Margin::same(1))
+        .show(ui, |ui| {
+            ui.set_min_size(table_size);
+            ui.set_max_size(table_size);
+            egui::ScrollArea::vertical()
+                .id_salt("settings-keyboard-shortcuts")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    paint_keyboard_shortcuts_rows(ui);
+                });
+        });
+}
+
+#[allow(clippy::too_many_lines)]
+fn paint_keyboard_shortcuts_rows(ui: &mut egui::Ui) {
+    let available_width = ui.available_width();
+    let compact = available_width < 420.0;
+    let col_action = if compact {
+        16.0
+    } else {
+        (available_width * 0.54).clamp(220.0, available_width - 180.0)
+    };
+
+    let header_height = 32.0;
+    let (header_rect, _) =
+        ui.allocate_exact_size(Vec2::new(available_width, header_height), Sense::hover());
+    ui.painter()
+        .rect_filled(header_rect, 8.0, vercel_surface_hover());
+    ui.painter().hline(
+        header_rect.x_range(),
+        header_rect.bottom(),
+        Stroke::new(1.0, vercel_border()),
+    );
+    ui.painter().text(
+        egui::pos2(header_rect.left() + 16.0, header_rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        "Action",
+        FontId::proportional(11.0),
+        text_disabled(),
+    );
+    if !compact {
+        ui.painter().text(
+            egui::pos2(header_rect.left() + col_action, header_rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            "Shortcut",
+            FontId::proportional(11.0),
+            text_disabled(),
+        );
+    }
+
+    let mut current_category = "";
+
+    for entry in KEYBOARD_SHORTCUTS {
+        if entry.category != current_category {
+            current_category = entry.category;
+            let (cat_rect, _) =
+                ui.allocate_exact_size(Vec2::new(available_width, 34.0), Sense::hover());
+            ui.painter().hline(
+                cat_rect.x_range(),
+                cat_rect.top(),
+                Stroke::new(1.0, vercel_border()),
+            );
+            ui.painter().text(
+                egui::pos2(cat_rect.left() + 16.0, cat_rect.center().y + 1.0),
+                egui::Align2::LEFT_CENTER,
+                current_category,
+                FontId::proportional(12.5),
+                vercel_text_primary(),
+            );
+        }
+
+        let row_height = if compact { 58.0 } else { 42.0 };
+        let (row_rect, response) =
+            ui.allocate_exact_size(Vec2::new(available_width, row_height), Sense::hover());
+        let row_rect_inner = row_rect.shrink2(Vec2::new(8.0, 2.0));
+        if response.hovered() {
+            ui.painter()
+                .rect_filled(row_rect_inner, 6.0, vercel_surface_hover());
+        }
+        ui.painter().hline(
+            row_rect.x_range(),
+            row_rect.bottom(),
+            Stroke::new(1.0, vercel_border()),
+        );
+
+        let action_y = if compact {
+            row_rect.top() + 18.0
+        } else {
+            row_rect.center().y
+        };
+        ui.painter().text(
+            egui::pos2(row_rect.left() + 16.0, action_y),
+            egui::Align2::LEFT_CENTER,
+            entry.action,
+            FontId::proportional(13.0),
+            vercel_text_primary(),
+        );
+
+        let keys_top = if compact {
+            row_rect.top() + 30.0
+        } else {
+            row_rect.top()
+        };
+        let keys_left = if compact {
+            row_rect.left() + 16.0
+        } else {
+            row_rect.left() + col_action
+        };
+        let mut keys_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(egui::Rect::from_min_max(
+                    egui::pos2(keys_left, keys_top),
+                    row_rect.right_bottom() - Vec2::new(14.0, 0.0),
+                ))
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        );
+        for (i, key) in entry.keys.iter().enumerate() {
+            if i > 0 {
+                keys_ui.add_space(4.0);
+                let (plus_rect, _) =
+                    keys_ui.allocate_exact_size(Vec2::new(8.0, 22.0), Sense::hover());
+                keys_ui.painter().text(
+                    plus_rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "+",
+                    FontId::monospace(10.0),
+                    text_disabled(),
+                );
+                keys_ui.add_space(2.0);
+            }
+            paint_kbd_keycap(&mut keys_ui, key);
+        }
+    }
+}
+
 fn settings_section_content(
     ui: &mut egui::Ui,
     section: SettingsSection,
     theme: &mut AppTheme,
     auto_expand_sidebar: &mut bool,
+    header_show_todos: &mut bool,
+    header_show_focus_timer: &mut bool,
+    header_show_chatgpt: &mut bool,
 ) {
     match section {
         SettingsSection::General => {
@@ -4620,6 +5046,34 @@ fn settings_section_content(
                 "When enabled, hovering the collapsed sidebar opens the full workspace list.",
                 auto_expand_sidebar,
             );
+            ui.add_space(24.0);
+            ui.label(
+                RichText::new("Header")
+                    .font(FontId::proportional(14.0))
+                    .strong()
+                    .color(vercel_text_primary()),
+            );
+            ui.add_space(12.0);
+            settings_toggle_row(
+                ui,
+                "Todo list",
+                "Show the todo list shortcut in the top header.",
+                header_show_todos,
+            );
+            ui.add_space(8.0);
+            settings_toggle_row(
+                ui,
+                "Focus timer",
+                "Show the focus timer shortcut in the top header.",
+                header_show_focus_timer,
+            );
+            ui.add_space(8.0);
+            settings_toggle_row(
+                ui,
+                "ChatGPT",
+                "Show the ChatGPT usage shortcut in the top header.",
+                header_show_chatgpt,
+            );
         }
         SettingsSection::Appearance => {
             ui.label(
@@ -4631,7 +5085,10 @@ fn settings_section_content(
             ui.add_space(12.0);
             settings_theme_row(ui, theme);
         }
-        SettingsSection::Keyboard | SettingsSection::Advanced => {}
+        SettingsSection::Keyboard => {
+            paint_keyboard_shortcuts_table(ui);
+        }
+        SettingsSection::Advanced => {}
     }
 }
 
@@ -4977,6 +5434,7 @@ struct TerminalPane {
     mouse_buttons: u8,
     pending_output: Vec<u8>,
     synchronized_output_since: Option<Instant>,
+    last_output_at: Option<Instant>,
     recent_command: Option<String>,
     cursor_last_activity: Instant,
     reveal_started_at: Instant,
@@ -5057,6 +5515,7 @@ impl TerminalPane {
             mouse_buttons: 0,
             pending_output: Vec::new(),
             synchronized_output_since: None,
+            last_output_at: None,
             recent_command: None,
             cursor_last_activity: Instant::now(),
             reveal_started_at: Instant::now(),
@@ -5121,7 +5580,9 @@ impl TerminalPane {
 
     fn process_output(&mut self, data: &[u8]) {
         if !data.is_empty() {
-            self.cursor_last_activity = Instant::now();
+            let now = Instant::now();
+            self.cursor_last_activity = now;
+            self.last_output_at = Some(now);
         }
         self.pending_output.extend_from_slice(data);
         self.process_complete_output_frames();
@@ -5779,7 +6240,8 @@ fn terminal_pane_ui(
         && current_block_top.is_some()
         && pane.close_started_at.is_none())
     .then(|| pane.recent_command.clone())
-    .flatten();
+    .flatten()
+    .filter(|command| should_show_recent_command_suggestion(command));
     if let Some(command) = recent_command.as_deref()
         && paint_recent_command_suggestion(
             ui,
@@ -6018,6 +6480,73 @@ fn compact_command_suggestion(command: &str, max_chars: usize) -> String {
     }
     let keep = max_chars.saturating_sub(1);
     format!("{}…", command.chars().take(keep).collect::<String>())
+}
+
+fn should_show_recent_command_suggestion(command: &str) -> bool {
+    !is_app_runtime_command(command)
+}
+
+fn is_app_runtime_command(command: &str) -> bool {
+    let tokens = command.split_whitespace().collect::<Vec<_>>();
+    let Some(program) = tokens.first().map(|token| normalized_command_word(token)) else {
+        return false;
+    };
+
+    match program.as_str() {
+        "npm" | "pnpm" | "yarn" | "bun" => package_manager_command_runs_app(&tokens),
+        "cargo" => cargo_command_runs_app(&tokens),
+        _ => false,
+    }
+}
+
+fn package_manager_command_runs_app(tokens: &[&str]) -> bool {
+    let Some(command) = tokens.get(1).map(|token| normalized_command_word(token)) else {
+        return false;
+    };
+
+    if is_app_script_name(&command) {
+        return true;
+    }
+    command == "run"
+        && tokens
+            .get(2)
+            .is_some_and(|token| is_app_script_name(&normalized_command_word(token)))
+}
+
+fn cargo_command_runs_app(tokens: &[&str]) -> bool {
+    tokens
+        .get(1)
+        .is_some_and(|token| matches!(normalized_command_word(token).as_str(), "run" | "watch"))
+        || (tokens
+            .get(1)
+            .is_some_and(|token| normalized_command_word(token) == "tauri")
+            && tokens
+                .get(2)
+                .is_some_and(|token| normalized_command_word(token) == "dev"))
+        || (tokens
+            .get(1)
+            .is_some_and(|token| normalized_command_word(token) == "leptos")
+            && tokens
+                .get(2)
+                .is_some_and(|token| normalized_command_word(token) == "watch"))
+}
+
+fn is_app_script_name(script: &str) -> bool {
+    matches!(
+        script,
+        "dev" | "start" | "serve" | "server" | "watch" | "preview"
+    )
+}
+
+fn normalized_command_word(token: &str) -> String {
+    let token = token
+        .trim_matches(|character| matches!(character, '\'' | '"'))
+        .to_ascii_lowercase();
+    token
+        .strip_suffix(".cmd")
+        .or_else(|| token.strip_suffix(".exe"))
+        .unwrap_or(&token)
+        .to_owned()
 }
 
 #[allow(
@@ -7733,6 +8262,39 @@ mod tests {
     }
 
     #[test]
+    fn app_runtime_commands_are_not_suggested() {
+        for command in [
+            "npm run dev",
+            "npm start",
+            "npm.cmd run preview -- --host 0.0.0.0",
+            "pnpm dev",
+            "yarn run serve",
+            "bun run start",
+            "cargo run --release",
+            "cargo watch -x run",
+            "cargo tauri dev",
+            "cargo leptos watch",
+        ] {
+            assert!(!should_show_recent_command_suggestion(command), "{command}");
+        }
+    }
+
+    #[test]
+    fn one_shot_commands_are_still_suggested() {
+        for command in [
+            "npm run build",
+            "pnpm test",
+            "yarn lint",
+            "bun run typecheck",
+            "cargo test --workspace",
+            "cargo build --release",
+            "git status",
+        ] {
+            assert!(should_show_recent_command_suggestion(command), "{command}");
+        }
+    }
+
+    #[test]
     fn compact_text_preserves_short_names_and_truncates_long_ones() {
         assert_eq!(compact_text("workspace", 12), "workspace");
         assert_eq!(compact_text("a very long workspace", 12), "a very lo...");
@@ -7789,7 +8351,7 @@ mod tests {
             };
             panes.insert(metadata.id, TerminalPane::new(&metadata));
         }
-        let state = WorkspaceState {
+        let mut state = WorkspaceState {
             model: workspace,
             panes,
         };
@@ -7799,6 +8361,37 @@ mod tests {
         assert_eq!(summary.active_terminals, 3);
         assert_eq!(summary.codex_agents, 1);
         assert_eq!(summary.opencode_agents, 1);
+        assert!(!workspace_has_working_agent(&state));
+
+        let agent = state
+            .panes
+            .values_mut()
+            .find(|pane| {
+                matches!(
+                    pane.status,
+                    SessionStatus::Starting | SessionStatus::Running
+                ) && pane_agent_kind(pane).is_some()
+            })
+            .unwrap();
+        agent.process_output(b"thinking");
+        assert!(workspace_has_working_agent(&state));
+
+        let agent = state
+            .panes
+            .values_mut()
+            .find(|pane| {
+                matches!(
+                    pane.status,
+                    SessionStatus::Starting | SessionStatus::Running
+                ) && pane_agent_kind(pane).is_some()
+            })
+            .unwrap();
+        agent.last_output_at = Some(
+            Instant::now()
+                .checked_sub(AGENT_WORKING_OUTPUT_GRACE + Duration::from_millis(1))
+                .unwrap(),
+        );
+        assert!(!workspace_has_working_agent(&state));
     }
 
     #[test]
@@ -7834,6 +8427,7 @@ mod tests {
         assert_eq!(summary.active_terminals, 2);
         assert_eq!(summary.codex_agents, 0);
         assert_eq!(summary.opencode_agents, 0);
+        assert!(!workspace_has_working_agent(&state));
     }
 
     #[test]
@@ -7856,6 +8450,32 @@ mod tests {
         );
         assert_eq!(cells.iter().filter(|color| **color == white).count(), 1);
         assert_eq!(pattern, workspace_dither_pattern(seed));
+    }
+
+    #[test]
+    fn workspace_dither_animation_changes_frames_without_new_colors() {
+        let workspace_id = "00000000-0000-4000-8000-000000000001"
+            .parse::<ade_core::WorkspaceId>()
+            .unwrap();
+        let seed = workspace_identity_hash(workspace_id);
+
+        let first = workspace_animated_dither_pattern(seed, 0);
+        let second = workspace_animated_dither_pattern(seed, 5);
+        let identity_color = Color32::from_rgb(0xff, 0x38, 0x83);
+        let white = Color32::from_rgb(0xf8, 0xfa, 0xff);
+        let allowed = [identity_color, white];
+
+        assert_ne!(first, second);
+        assert!(first.iter().flatten().all(|color| allowed.contains(color)));
+        assert!(second.iter().flatten().all(|color| allowed.contains(color)));
+        assert_eq!(
+            first.iter().filter(|color| **color == Some(white)).count(),
+            1
+        );
+        assert_eq!(
+            second.iter().filter(|color| **color == Some(white)).count(),
+            1
+        );
     }
 
     #[test]
