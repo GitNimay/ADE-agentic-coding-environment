@@ -4183,6 +4183,56 @@ fn show_workspace_hover_card(ui: &egui::Ui, anchor: egui::Rect, workspace: &Work
                 .show(ui, |ui| {
                     ui.set_min_size(Vec2::new(width, height));
                     let inner = ui.max_rect().shrink2(Vec2::new(14.0, 16.0));
+
+                    let path_str =
+                        compact_text(&workspace.model.root_directory.display().to_string(), 44);
+                    let path_font = FontId::proportional(12.8);
+                    let path_text_width = ui.fonts_mut(|fonts| {
+                        fonts
+                            .layout_no_wrap(
+                                path_str.clone(),
+                                path_font.clone(),
+                                vercel_text_primary(),
+                            )
+                            .size()
+                            .x
+                    });
+
+                    let stats_font = FontId::proportional(10.5);
+                    let count_label = summary.changed_files.to_string();
+                    let add_label = format!("+{}", summary.additions);
+                    let del_label = format!("-{}", summary.deletions);
+                    let count_w = ui.fonts_mut(|fonts| {
+                        fonts
+                            .layout_no_wrap(
+                                count_label.clone(),
+                                stats_font.clone(),
+                                Color32::from_rgb(175, 175, 175),
+                            )
+                            .size()
+                            .x
+                    });
+                    let add_w = ui.fonts_mut(|fonts| {
+                        fonts
+                            .layout_no_wrap(
+                                add_label.clone(),
+                                stats_font.clone(),
+                                Color32::from_rgb(82, 196, 92),
+                            )
+                            .size()
+                            .x
+                    });
+                    let del_w = ui.fonts_mut(|fonts| {
+                        fonts
+                            .layout_no_wrap(
+                                del_label.clone(),
+                                stats_font.clone(),
+                                Color32::from_rgb(238, 91, 91),
+                            )
+                            .size()
+                            .x
+                    });
+
                     let painter = ui.painter().with_clip_rect(inner);
                     let title_y = inner.top() + 10.0;
                     paint_hover_folder_icon(
@@ -4257,10 +4307,62 @@ fn show_workspace_hover_card(ui: &egui::Ui, anchor: egui::Rect, workspace: &Work
                     painter.text(
                         egui::pos2(inner.left() + 28.0, path_y),
                         egui::Align2::LEFT_CENTER,
-                        compact_text(&workspace.model.root_directory.display().to_string(), 44),
-                        FontId::proportional(12.8),
+                        &path_str,
+                        path_font,
                         vercel_text_primary(),
                     );
+
+                    if summary.changed_files > 0 {
+                        const ICON_W: f32 = 10.0;
+                        const ICON_TEXT_GAP: f32 = 4.0;
+                        const STAT_GAP: f32 = 8.0;
+                        let gap = 10.0;
+                        let count_group_w = ICON_W + ICON_TEXT_GAP + count_w;
+                        let mut x = inner.left() + 28.0 + path_text_width + gap;
+                        let stats_width = inner.right() - x;
+
+                        if stats_width >= count_group_w {
+                            paint_file_icon(
+                                &painter,
+                                egui::pos2(x, path_y),
+                                Color32::from_rgb(145, 145, 145),
+                            );
+                            x += ICON_W + ICON_TEXT_GAP;
+                            painter.text(
+                                egui::pos2(x, path_y),
+                                egui::Align2::LEFT_CENTER,
+                                &count_label,
+                                stats_font.clone(),
+                                Color32::from_rgb(175, 175, 175),
+                            );
+                            x += count_w;
+
+                            if stats_width >= count_group_w + STAT_GAP + add_w {
+                                x += STAT_GAP;
+                                painter.text(
+                                    egui::pos2(x, path_y),
+                                    egui::Align2::LEFT_CENTER,
+                                    &add_label,
+                                    stats_font.clone(),
+                                    Color32::from_rgb(82, 196, 92),
+                                );
+                                x += add_w;
+
+                                if stats_width
+                                    >= count_group_w + STAT_GAP + add_w + STAT_GAP + del_w
+                                {
+                                    x += STAT_GAP;
+                                    painter.text(
+                                        egui::pos2(x, path_y),
+                                        egui::Align2::LEFT_CENTER,
+                                        &del_label,
+                                        stats_font,
+                                        Color32::from_rgb(238, 91, 91),
+                                    );
+                                }
+                            }
+                        }
+                    }
                 });
         });
 }
@@ -4269,6 +4371,9 @@ struct WorkspaceHoverSummary {
     active_terminals: usize,
     codex_agents: usize,
     opencode_agents: usize,
+    changed_files: usize,
+    additions: usize,
+    deletions: usize,
 }
 
 fn workspace_hover_summary(workspace: &WorkspaceState) -> WorkspaceHoverSummary {
@@ -4276,19 +4381,26 @@ fn workspace_hover_summary(workspace: &WorkspaceState) -> WorkspaceHoverSummary 
         active_terminals: 0,
         codex_agents: 0,
         opencode_agents: 0,
+        changed_files: 0,
+        additions: 0,
+        deletions: 0,
     };
     for pane in workspace.panes.values() {
-        if !matches!(
+        if matches!(
             pane.status,
             SessionStatus::Starting | SessionStatus::Running
         ) {
-            continue;
+            summary.active_terminals += 1;
+            match pane_agent_kind(pane) {
+                Some(AgentKind::Codex) => summary.codex_agents += 1,
+                Some(AgentKind::OpenCode) => summary.opencode_agents += 1,
+                None => {}
+            }
         }
-        summary.active_terminals += 1;
-        match pane_agent_kind(pane) {
-            Some(AgentKind::Codex) => summary.codex_agents += 1,
-            Some(AgentKind::OpenCode) => summary.opencode_agents += 1,
-            None => {}
+        if let Some(ref git) = pane.git_status {
+            summary.changed_files += git.changed_files;
+            summary.additions += git.additions;
+            summary.deletions += git.deletions;
         }
     }
     summary
