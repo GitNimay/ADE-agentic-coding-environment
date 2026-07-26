@@ -7,7 +7,10 @@ use std::os::windows::io::AsRawHandle;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -61,6 +64,8 @@ const SIDEBAR_CLOSE_DELAY: Duration = Duration::from_millis(450);
 const UPDATE_IDLE_DURATION: Duration = Duration::from_mins(5);
 const CODEX_USAGE_REFRESH_INTERVAL: Duration = Duration::from_secs(20);
 const CODEX_USAGE_HOVER_BRIDGE: Duration = Duration::from_millis(360);
+const TODO_COMPLETE_GRACE: Duration = Duration::from_secs(5);
+const TODO_LIMIT: usize = 10;
 const CHATGPT_LOGO_SVG: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path fill="#fff" d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.872zm16.5963 3.8558L13.1038 8.364 15.1192 7.2a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.407-.667zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997Z"/></svg>"##;
 const OPENCODE_LOGO_SVG: &[u8] = br##"<svg viewBox="0 0 300 300" fill="none" xmlns="http://www.w3.org/2000/svg"><g transform="translate(30 0)"><path d="M180 240H60V120H180V240Z" fill="#4B4646"/><path d="M180 60H60V240H180V60ZM240 300H0V0H240V300Z" fill="#F1ECEC"/></g></svg>"##;
 const SETTINGS_GEAR_SVG: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.38a2 2 0 0 0-.73-2.73l-.15-.09a2 2 0 0 1-1-1.74v-.51a2 2 0 0 1 1-1.72l.15-.1a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2Z"/><circle cx="12" cy="12" r="3"/></svg>"##;
@@ -74,6 +79,7 @@ const RELEASE_REPOSITORY_NAME: &str = "ADE-agentic-coding-environment";
 // and truncate it before replacement.
 const RELEASE_ASSET_NAME: &str = "windows-x64-termy.exe";
 const UI_SETTINGS_STORAGE_KEY: &str = "termy-ui-settings";
+static LIGHT_THEME: AtomicBool = AtomicBool::new(false);
 
 enum UpdateEvent {
     CheckComplete(Option<String>),
@@ -96,8 +102,166 @@ enum AppUpdateState {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default)]
 struct PersistedUiSettings {
+    theme: AppTheme,
     auto_expand_sidebar: bool,
+    todos: Vec<PersistedTodoItem>,
+    focus_best_secs: u64,
+    focus_elapsed_secs: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum AppTheme {
+    #[default]
+    Dark,
+    Light,
+}
+
+impl AppTheme {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Dark => "Dark",
+            Self::Light => "Light",
+        }
+    }
+
+    const fn is_light(self) -> bool {
+        matches!(self, Self::Light)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct PersistedTodoItem {
+    text: String,
+}
+
+#[derive(Clone, Debug)]
+struct TodoItem {
+    text: String,
+    completed_at: Option<Instant>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct TodoListState {
+    items: Vec<TodoItem>,
+    draft: String,
+    panel_hovered: bool,
+    keep_open_until: Option<Instant>,
+}
+
+impl TodoListState {
+    fn from_persisted(items: Vec<PersistedTodoItem>) -> Self {
+        Self {
+            items: items
+                .into_iter()
+                .filter_map(|item| {
+                    let text = normalized_todo_text(&item.text)?;
+                    Some(TodoItem {
+                        text,
+                        completed_at: None,
+                    })
+                })
+                .take(TODO_LIMIT)
+                .collect(),
+            ..Self::default()
+        }
+    }
+
+    fn persisted_items(&self) -> Vec<PersistedTodoItem> {
+        self.items
+            .iter()
+            .filter(|item| item.completed_at.is_none())
+            .map(|item| PersistedTodoItem {
+                text: item.text.clone(),
+            })
+            .collect()
+    }
+
+    fn add_draft(&mut self) -> bool {
+        if self.items.len() >= TODO_LIMIT {
+            return false;
+        }
+        let Some(text) = normalized_todo_text(&self.draft) else {
+            return false;
+        };
+        self.items.push(TodoItem {
+            text,
+            completed_at: None,
+        });
+        self.draft.clear();
+        true
+    }
+
+    fn active_count(&self) -> usize {
+        self.items
+            .iter()
+            .filter(|item| item.completed_at.is_none())
+            .count()
+    }
+
+    fn purge_completed(&mut self, now: Instant) -> bool {
+        let before = self.items.len();
+        self.items.retain(|item| {
+            item.completed_at
+                .is_none_or(|completed_at| now.duration_since(completed_at) < TODO_COMPLETE_GRACE)
+        });
+        before != self.items.len()
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct FocusTimerState {
+    accumulated_secs: u64,
+    best_session_secs: u64,
+    running_since: Option<Instant>,
+    panel_hovered: bool,
+    keep_open_until: Option<Instant>,
+}
+
+impl FocusTimerState {
+    fn from_persisted(elapsed_secs: u64, best_session_secs: u64) -> Self {
+        Self {
+            accumulated_secs: elapsed_secs,
+            best_session_secs,
+            ..Self::default()
+        }
+    }
+
+    fn elapsed_secs(&self, now: Instant) -> u64 {
+        self.accumulated_secs
+            + self
+                .running_since
+                .map_or(0, |started| now.duration_since(started).as_secs())
+    }
+
+    fn persisted_elapsed_secs(&self) -> u64 {
+        self.elapsed_secs(Instant::now())
+    }
+
+    fn best_session_secs(&self, now: Instant) -> u64 {
+        self.best_session_secs.max(self.elapsed_secs(now))
+    }
+
+    fn running(&self) -> bool {
+        self.running_since.is_some()
+    }
+
+    fn toggle(&mut self, now: Instant) {
+        if let Some(started) = self.running_since.take() {
+            self.accumulated_secs += now.duration_since(started).as_secs();
+            self.best_session_secs = self.best_session_secs.max(self.accumulated_secs);
+        } else {
+            self.running_since = Some(now);
+        }
+    }
+
+    fn reset(&mut self, now: Instant) {
+        self.best_session_secs = self.best_session_secs.max(self.elapsed_secs(now));
+        self.accumulated_secs = 0;
+        self.running_since = None;
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -241,7 +405,7 @@ impl CodexUsageMonitor {
                 .show(context, |ui| {
                     ui.set_width(width);
                     egui::Frame::NONE
-                        .fill(Color32::from_rgb(10, 10, 10))
+                        .fill(subtle_panel_fill())
                         .stroke(Stroke::new(1.0, border()))
                         .corner_radius(12.0)
                         .shadow(egui::epaint::Shadow {
@@ -753,6 +917,7 @@ struct AdeApp {
     sidebar_left_at: Option<Instant>,
     settings_open: bool,
     settings_section: SettingsSection,
+    theme: AppTheme,
     auto_expand_sidebar: bool,
     terminal_limit_popup: bool,
     close_requested: bool,
@@ -765,11 +930,19 @@ struct AdeApp {
     last_user_activity: Instant,
     restart_executable: Option<PathBuf>,
     codex_usage: CodexUsageMonitor,
+    todos: TodoListState,
+    focus: FocusTimerState,
 }
 
 impl AdeApp {
     fn new(creation_context: &eframe::CreationContext<'_>) -> Self {
-        configure_style(&creation_context.egui_ctx);
+        let persisted_ui = creation_context
+            .storage
+            .and_then(|storage| {
+                eframe::get_value::<PersistedUiSettings>(storage, UI_SETTINGS_STORAGE_KEY)
+            })
+            .unwrap_or_default();
+        configure_style(&creation_context.egui_ctx, persisted_ui.theme);
         egui_extras::install_image_loaders(&creation_context.egui_ctx);
         let client = DaemonClient::connect(&creation_context.egui_ctx);
         let error_message = client.as_ref().err().map(ToString::to_string);
@@ -794,12 +967,6 @@ impl AdeApp {
                 update_state = AppUpdateState::Idle;
             }
         }
-        let persisted_ui = creation_context
-            .storage
-            .and_then(|storage| {
-                eframe::get_value::<PersistedUiSettings>(storage, UI_SETTINGS_STORAGE_KEY)
-            })
-            .unwrap_or_default();
         let mut app = Self {
             workspaces: Vec::new(),
             active_workspace: 0,
@@ -815,6 +982,7 @@ impl AdeApp {
             sidebar_left_at: None,
             settings_open: false,
             settings_section: SettingsSection::General,
+            theme: persisted_ui.theme,
             auto_expand_sidebar: persisted_ui.auto_expand_sidebar,
             terminal_limit_popup: false,
             close_requested: false,
@@ -827,6 +995,11 @@ impl AdeApp {
             last_user_activity: Instant::now(),
             restart_executable: std::env::current_exe().ok(),
             codex_usage: CodexUsageMonitor::new(&creation_context.egui_ctx),
+            todos: TodoListState::from_persisted(persisted_ui.todos),
+            focus: FocusTimerState::from_persisted(
+                persisted_ui.focus_elapsed_secs,
+                persisted_ui.focus_best_secs,
+            ),
         };
         cleanup_old_clipboard_images();
         app.send(ClientRequest::Attach);
@@ -987,7 +1160,7 @@ impl AdeApp {
             .show(context, |ui| {
                 ui.set_width(width);
                 egui::Frame::NONE
-                    .fill(Color32::from_rgb(10, 10, 10))
+                    .fill(subtle_panel_fill())
                     .stroke(Stroke::new(1.0, border()))
                     .corner_radius(10.0)
                     .shadow(egui::epaint::Shadow {
@@ -1802,6 +1975,7 @@ impl AdeApp {
                 settings_section_content(
                     &mut settings_content,
                     self.settings_section,
+                    &mut self.theme,
                     &mut self.auto_expand_sidebar,
                 );
             });
@@ -1878,10 +2052,10 @@ impl AdeApp {
             ))
             .show(context, |ui| {
                 ui.set_width(panel_width);
-                egui::Frame::window(&context.style_of(egui::Theme::Dark))
-                    .fill(Color32::BLACK)
+                egui::Frame::NONE
+                    .fill(surface_primary())
                     .corner_radius(12.0)
-                    .stroke(Stroke::new(1.0, Color32::from_rgb(46, 46, 46)))
+                    .stroke(Stroke::new(1.0, border()))
                     .inner_margin(egui::Margin::same(0))
                     .show(ui, |ui| {
                         ui.set_width(panel_width - 2.0);
@@ -1995,7 +2169,7 @@ impl AdeApp {
         }
         let modal_width = (context.content_rect().width() - 32.0).clamp(304.0, 400.0);
         let modal_frame = egui::Frame::NONE
-            .fill(Color32::from_rgb(10, 10, 10))
+            .fill(subtle_panel_fill())
             .stroke(Stroke::new(1.0, border()))
             .corner_radius(12.0)
             .shadow(egui::epaint::Shadow {
@@ -2063,7 +2237,7 @@ impl AdeApp {
         }
         let modal_width = (context.content_rect().width() - 32.0).clamp(304.0, 400.0);
         let modal_frame = egui::Frame::NONE
-            .fill(Color32::from_rgb(10, 10, 10))
+            .fill(subtle_panel_fill())
             .stroke(Stroke::new(1.0, border()))
             .corner_radius(12.0)
             .shadow(egui::epaint::Shadow {
@@ -2139,7 +2313,11 @@ impl eframe::App for AdeApp {
             storage,
             UI_SETTINGS_STORAGE_KEY,
             &PersistedUiSettings {
+                theme: self.theme,
                 auto_expand_sidebar: self.auto_expand_sidebar,
+                todos: self.todos.persisted_items(),
+                focus_best_secs: self.focus.best_session_secs(Instant::now()),
+                focus_elapsed_secs: self.focus.persisted_elapsed_secs(),
             },
         );
     }
@@ -2198,11 +2376,23 @@ impl eframe::App for AdeApp {
 
         let compact = ui.available_width() <= SIDEBAR_BREAKPOINT;
         if compact {
-            window_title_bar(ui, &context, &mut self.codex_usage);
+            window_title_bar(
+                ui,
+                &context,
+                &mut self.codex_usage,
+                &mut self.todos,
+                &mut self.focus,
+            );
             self.sidebar(ui, &context);
         } else {
             self.sidebar(ui, &context);
-            window_title_bar(ui, &context, &mut self.codex_usage);
+            window_title_bar(
+                ui,
+                &context,
+                &mut self.codex_usage,
+                &mut self.todos,
+                &mut self.focus,
+            );
         }
 
         let requests = self.client.as_ref().map(|client| client.requests.clone());
@@ -2303,6 +2493,8 @@ fn window_title_bar(
     root_ui: &mut egui::Ui,
     context: &egui::Context,
     codex_usage: &mut CodexUsageMonitor,
+    todos: &mut TodoListState,
+    focus: &mut FocusTimerState,
 ) {
     let maximized = context.input(|input| input.viewport().maximized.unwrap_or(false));
     let panel = egui::Panel::top("window-title-bar")
@@ -2320,6 +2512,9 @@ fn window_title_bar(
                     context.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                 }
                 codex_usage.show(ui, context);
+                todo_list_button(ui, context, todos);
+                ui.add_space(-4.0);
+                focus_timer_button(ui, context, focus);
 
                 let drag_rect = ui.available_rect_before_wrap();
                 let drag = ui.interact(
@@ -2359,6 +2554,659 @@ fn window_title_bar(
         0.0,
         border(),
     );
+}
+
+fn focus_timer_button(ui: &mut egui::Ui, context: &egui::Context, focus: &mut FocusTimerState) {
+    let now = Instant::now();
+    let elapsed = focus.elapsed_secs(now);
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(150.0, WINDOW_TITLE_BAR_HEIGHT), Sense::click());
+    let header_time = header_focus_duration(elapsed);
+    let label = format!("Focus timer, {header_time}");
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), &label)
+    });
+    let open =
+        response.hovered() || response.has_focus() || focus.panel_hovered || response.clicked();
+    let reveal = context.animate_bool_with_time_and_easing(
+        egui::Id::new("focus-timer-reveal"),
+        open,
+        0.18,
+        egui::emath::easing::cubic_out,
+    );
+
+    let hovered = response.hovered() || response.has_focus();
+    let button_rect = rect.shrink2(Vec2::new(4.0, 5.0));
+    if hovered || focus.running() {
+        ui.painter().rect_filled(
+            button_rect,
+            8.0,
+            if focus.running() {
+                surface_active()
+            } else {
+                surface_hover()
+            },
+        );
+    }
+    let icon_center = button_rect.left_center() + Vec2::new(11.0, 0.0);
+    paint_focus_icon(
+        ui.painter(),
+        icon_center,
+        6.5,
+        if focus.running() {
+            Color32::from_rgb(70, 167, 88)
+        } else {
+            text_primary()
+        },
+    );
+    paint_focus_header_label(
+        ui,
+        egui::pos2(icon_center.x + 24.0, button_rect.center().y),
+        elapsed,
+    );
+
+    if open {
+        let available_width = context.content_rect().width();
+        let width = (available_width - 32.0).clamp(260.0, 310.0);
+        let position = egui::pos2(
+            (rect.center().x - width / 2.0).clamp(16.0, available_width - width - 16.0),
+            rect.bottom() - 2.0 - 5.0 * (1.0 - reveal),
+        );
+        let area = egui::Area::new(egui::Id::new("focus-timer-panel"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(position)
+            .show(context, |ui| {
+                ui.set_width(width);
+                egui::Frame::NONE
+                    .fill(subtle_panel_fill())
+                    .stroke(Stroke::new(1.0, border()))
+                    .corner_radius(18.0)
+                    .shadow(egui::epaint::Shadow {
+                        offset: [0, 12],
+                        blur: 30,
+                        spread: 0,
+                        color: Color32::from_black_alpha(118).gamma_multiply(reveal),
+                    })
+                    .inner_margin(egui::Margin::symmetric(13, 12))
+                    .show(ui, |ui| {
+                        ui.set_opacity(reveal);
+                        show_focus_panel(ui, focus, now);
+                    });
+            });
+        focus.panel_hovered = context
+            .pointer_hover_pos()
+            .is_some_and(|pointer| area.response.rect.expand(2.0).contains(pointer));
+        context.request_repaint_after(Duration::from_millis(16));
+    } else {
+        focus.panel_hovered = false;
+        focus.keep_open_until = None;
+    }
+    if focus.running() {
+        context.request_repaint_after(Duration::from_millis(250));
+    }
+    response.on_hover_cursor(egui::CursorIcon::PointingHand);
+}
+
+fn paint_focus_header_label(ui: &mut egui::Ui, position: egui::Pos2, elapsed_secs: u64) {
+    let hours = elapsed_secs / 3600;
+    let minutes = (elapsed_secs / 60) % 60;
+    let seconds = elapsed_secs % 60;
+
+    let pieces = [
+        (
+            "Focus:".to_owned(),
+            FontId::proportional(13.5),
+            text_primary(),
+        ),
+        (" ".to_owned(), FontId::proportional(13.5), text_primary()),
+        (
+            hours.to_string(),
+            FontId::monospace(14.0),
+            focus_hour_color(),
+        ),
+        (":".to_owned(), FontId::monospace(13.5), text_secondary()),
+        (
+            format!("{minutes:02}"),
+            FontId::monospace(14.0),
+            focus_minute_color(),
+        ),
+        (":".to_owned(), FontId::monospace(13.5), text_secondary()),
+        (
+            format!("{seconds:02}"),
+            FontId::monospace(14.0),
+            focus_second_color(),
+        ),
+    ];
+    let galleys: Vec<_> = pieces
+        .into_iter()
+        .map(|(text, font, color)| {
+            let galley = ui.painter().layout_no_wrap(text, font, color);
+            (galley, color)
+        })
+        .collect();
+    let mut cursor_x = position.x;
+    let group_height = galleys
+        .iter()
+        .map(|(galley, _)| galley.size().y)
+        .fold(0.0, f32::max);
+    let top = position.y - group_height / 2.0;
+    for (galley, color) in galleys {
+        let width = galley.size().x;
+        ui.painter().galley(
+            egui::pos2(cursor_x, top + (group_height - galley.size().y) / 2.0),
+            galley,
+            color,
+        );
+        cursor_x += width;
+    }
+}
+
+fn show_focus_panel(ui: &mut egui::Ui, focus: &mut FocusTimerState, now: Instant) {
+    ui.horizontal(|ui| {
+        let (mark, _) = ui.allocate_exact_size(Vec2::splat(15.0), Sense::hover());
+        paint_focus_icon(ui.painter(), mark.center(), 6.5, text_primary());
+        ui.label(
+            RichText::new("Focus")
+                .size(13.0)
+                .strong()
+                .color(text_primary()),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(
+                RichText::new(if focus.running() { "live" } else { "ready" })
+                    .size(12.0)
+                    .family(FontFamily::Monospace)
+                    .color(if focus.running() {
+                        Color32::from_rgb(70, 167, 88)
+                    } else {
+                        text_secondary()
+                    }),
+            );
+        });
+    });
+    ui.add_space(12.0);
+
+    let elapsed = focus.elapsed_secs(now);
+    show_focus_time_grid(ui, elapsed);
+    ui.add_space(10.0);
+
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new("Best focus session")
+                .size(12.0)
+                .color(text_secondary()),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(
+                RichText::new(format_focus_duration(focus.best_session_secs(now)))
+                    .size(12.5)
+                    .family(FontFamily::Monospace)
+                    .strong()
+                    .color(text_primary()),
+            );
+        });
+    });
+    ui.add_space(11.0);
+
+    ui.horizontal(|ui| {
+        let button_width = (ui.available_width() - 8.0) / 2.0;
+        if focus_action_button(
+            ui,
+            if focus.running() { "Pause" } else { "Start" },
+            true,
+            button_width,
+        )
+        .clicked()
+        {
+            focus.toggle(now);
+            ui.ctx().request_repaint();
+        }
+        if focus_action_button(ui, "Reset", false, button_width).clicked() {
+            focus.reset(now);
+            ui.ctx().request_repaint();
+        }
+    });
+}
+
+fn show_focus_time_grid(ui: &mut egui::Ui, elapsed_secs: u64) {
+    let hours = elapsed_secs / 3600;
+    let minutes = (elapsed_secs / 60) % 60;
+    let seconds = elapsed_secs % 60;
+    ui.columns(3, |columns| {
+        for (column, (label, value)) in
+            columns
+                .iter_mut()
+                .zip([("hrs", hours), ("min", minutes), ("sec", seconds)])
+        {
+            column.vertical_centered(|ui| {
+                ui.label(
+                    RichText::new(format!("{value:02}"))
+                        .size(19.0)
+                        .family(FontFamily::Monospace)
+                        .strong()
+                        .color(text_primary()),
+                );
+                ui.add_space(0.0);
+                ui.label(
+                    RichText::new(label)
+                        .size(10.5)
+                        .family(FontFamily::Monospace)
+                        .color(text_secondary()),
+                );
+            });
+        }
+    });
+}
+
+fn focus_action_button(
+    ui: &mut egui::Ui,
+    label: &str,
+    primary: bool,
+    width: f32,
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 31.0), Sense::click());
+    let hovered = response.hovered() || response.has_focus();
+    let pressed = response.is_pointer_button_down_on();
+    let (fill, text, stroke) = if primary {
+        (
+            primary_button_fill(hovered, pressed),
+            primary_button_text(),
+            primary_button_fill(false, false),
+        )
+    } else {
+        (
+            if pressed {
+                surface_active()
+            } else if hovered {
+                surface_hover()
+            } else {
+                surface_primary()
+            },
+            text_primary(),
+            if hovered { border_hover() } else { border() },
+        )
+    };
+    ui.painter().rect(
+        rect,
+        8.0,
+        fill,
+        Stroke::new(1.0, stroke),
+        egui::StrokeKind::Inside,
+    );
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        label,
+        FontId::proportional(13.0),
+        text,
+    );
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
+    });
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+fn paint_focus_icon(painter: &egui::Painter, center: egui::Pos2, radius: f32, color: Color32) {
+    let stroke_width = (radius / 5.0).clamp(1.05, 1.3);
+    painter.circle_stroke(center, radius, Stroke::new(stroke_width, color));
+    painter.line_segment(
+        [
+            center + Vec2::new(0.0, -radius * 0.5),
+            center + Vec2::new(0.0, radius * 0.1),
+        ],
+        Stroke::new(stroke_width, color),
+    );
+    painter.line_segment(
+        [
+            center + Vec2::new(0.0, radius * 0.1),
+            center + Vec2::new(radius * 0.45, radius * 0.34),
+        ],
+        Stroke::new(stroke_width, color),
+    );
+    painter.line_segment(
+        [
+            center + Vec2::new(-radius * 0.42, -radius * 1.25),
+            center + Vec2::new(radius * 0.42, -radius * 1.25),
+        ],
+        Stroke::new(stroke_width, color),
+    );
+}
+
+fn format_focus_duration(secs: u64) -> String {
+    let hours = secs / 3600;
+    let minutes = (secs / 60) % 60;
+    let seconds = secs % 60;
+    format!("{hours:02}:{minutes:02}:{seconds:02}")
+}
+
+fn focus_hour_color() -> Color32 {
+    Color32::from_rgb(82, 168, 255)
+}
+
+fn focus_minute_color() -> Color32 {
+    Color32::from_rgb(70, 167, 88)
+}
+
+fn focus_second_color() -> Color32 {
+    Color32::from_rgb(245, 166, 35)
+}
+
+fn header_focus_duration(secs: u64) -> String {
+    let hours = secs / 3600;
+    let minutes = (secs / 60) % 60;
+    let seconds = secs % 60;
+    format!("{hours}:{minutes:02}:{seconds:02}")
+}
+
+fn todo_list_button(ui: &mut egui::Ui, context: &egui::Context, todos: &mut TodoListState) {
+    let now = Instant::now();
+    if todos.purge_completed(now) {
+        context.request_repaint();
+    }
+
+    let count = todos.active_count();
+    let (rect, response) = ui.allocate_exact_size(
+        Vec2::new(
+            if count == 0 { 74.0 } else { 88.0 },
+            WINDOW_TITLE_BAR_HEIGHT,
+        ),
+        Sense::click(),
+    );
+    let label = format!("Todo list, {count} of {TODO_LIMIT} tasks");
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), &label)
+    });
+    let open =
+        response.hovered() || response.has_focus() || todos.panel_hovered || response.clicked();
+    let reveal = context.animate_bool_with_time_and_easing(
+        egui::Id::new("todo-list-reveal"),
+        open,
+        0.18,
+        egui::emath::easing::cubic_out,
+    );
+
+    let hovered = response.hovered() || response.has_focus();
+    let button_rect = rect.shrink2(Vec2::new(4.0, 5.0));
+    if hovered {
+        ui.painter().rect_filled(button_rect, 8.0, surface_hover());
+    }
+    let icon_rect = egui::Rect::from_min_size(
+        button_rect.left_center() + Vec2::new(7.0, -8.0),
+        Vec2::new(16.0, 16.0),
+    );
+    paint_todo_icon(ui.painter(), icon_rect, text_primary());
+    ui.painter().text(
+        egui::pos2(icon_rect.right() + 7.0, button_rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        "To do",
+        FontId::proportional(13.0),
+        text_primary(),
+    );
+    if count > 0 {
+        ui.painter().text(
+            egui::pos2(button_rect.right() - 9.0, button_rect.center().y),
+            egui::Align2::RIGHT_CENTER,
+            count.to_string(),
+            FontId::monospace(11.0),
+            text_secondary(),
+        );
+    }
+
+    if open {
+        let available_width = context.content_rect().width();
+        let width = if available_width < 520.0 {
+            (available_width - 32.0).clamp(260.0, 340.0)
+        } else if todos.items.len() > 5 {
+            520.0
+        } else {
+            300.0
+        };
+        let position = egui::pos2(
+            (rect.center().x - width / 2.0).clamp(16.0, available_width - width - 16.0),
+            rect.bottom() - 2.0 - 5.0 * (1.0 - reveal),
+        );
+        let area = egui::Area::new(egui::Id::new("todo-list-panel"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(position)
+            .show(context, |ui| {
+                ui.set_width(width);
+                egui::Frame::NONE
+                    .fill(subtle_panel_fill())
+                    .stroke(Stroke::new(1.0, border()))
+                    .corner_radius(18.0)
+                    .shadow(egui::epaint::Shadow {
+                        offset: [0, 12],
+                        blur: 30,
+                        spread: 0,
+                        color: Color32::from_black_alpha(118).gamma_multiply(reveal),
+                    })
+                    .inner_margin(egui::Margin::symmetric(14, 12))
+                    .show(ui, |ui| {
+                        ui.set_opacity(reveal);
+                        show_todo_panel(ui, todos);
+                    });
+            });
+        todos.panel_hovered = context
+            .pointer_hover_pos()
+            .is_some_and(|pointer| area.response.rect.expand(2.0).contains(pointer));
+        context.request_repaint_after(Duration::from_millis(16));
+    } else {
+        todos.panel_hovered = false;
+        todos.keep_open_until = None;
+    }
+    response.on_hover_cursor(egui::CursorIcon::PointingHand);
+}
+
+fn show_todo_panel(ui: &mut egui::Ui, todos: &mut TodoListState) {
+    ui.horizontal(|ui| {
+        let (mark, _) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
+        paint_todo_icon(ui.painter(), mark, text_primary());
+        ui.label(
+            RichText::new("To do")
+                .size(14.0)
+                .strong()
+                .color(text_primary()),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(
+                RichText::new(format!("{}/{}", todos.active_count(), TODO_LIMIT))
+                    .size(12.0)
+                    .family(FontFamily::Monospace)
+                    .color(text_secondary()),
+            );
+        });
+    });
+    ui.add_space(11.0);
+
+    if todos.items.len() <= 5 || ui.available_width() < 420.0 {
+        show_todo_column(ui, &mut todos.items);
+    } else {
+        let (first, second) = todos.items.split_at_mut(5);
+        ui.columns(2, |columns| {
+            show_todo_column(&mut columns[0], first);
+            show_todo_column(&mut columns[1], second);
+        });
+    }
+
+    ui.add_space(10.0);
+    let (divider, _) = ui.allocate_exact_size(
+        Vec2::new(ui.available_width(), 1.0 / ui.ctx().pixels_per_point()),
+        Sense::hover(),
+    );
+    ui.painter().rect_filled(divider, 0.0, border());
+    ui.add_space(10.0);
+    show_todo_add_row(ui, todos);
+}
+
+fn show_todo_column(ui: &mut egui::Ui, items: &mut [TodoItem]) {
+    for item in items {
+        let completed = item.completed_at.is_some();
+        let (rect, response) =
+            ui.allocate_exact_size(Vec2::new(ui.available_width(), 30.0), Sense::click());
+        if response.hovered() || response.has_focus() {
+            ui.painter().rect_filled(rect, 7.0, surface_hover());
+        }
+        let center = rect.left_center() + Vec2::new(13.0, 0.0);
+        let circle = if completed {
+            Color32::from_rgb(70, 167, 88)
+        } else if response.hovered() {
+            text_primary()
+        } else {
+            text_secondary()
+        };
+        ui.painter()
+            .circle_stroke(center, 8.0, Stroke::new(1.25, circle));
+        if completed {
+            paint_todo_check(ui.painter(), center, Color32::from_rgb(70, 167, 88));
+        }
+        let text = RichText::new(compact_text(&item.text, 34))
+            .size(13.5)
+            .color(if completed {
+                text_disabled()
+            } else {
+                text_primary()
+            });
+        ui.put(
+            egui::Rect::from_min_max(
+                rect.left_top() + Vec2::new(30.0, 4.0),
+                rect.right_bottom() - Vec2::new(6.0, 4.0),
+            ),
+            egui::Label::new(if completed {
+                text.strikethrough()
+            } else {
+                text
+            }),
+        );
+        if response.clicked() && item.completed_at.is_none() {
+            item.completed_at = Some(Instant::now());
+        }
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Checkbox, true, &item.text)
+        });
+    }
+}
+
+fn show_todo_add_row(ui: &mut egui::Ui, todos: &mut TodoListState) {
+    let disabled = todos.items.len() >= TODO_LIMIT;
+    ui.horizontal(|ui| {
+        let input_width = (ui.available_width() - 46.0).max(120.0);
+        let input = egui::Frame::NONE
+            .fill(surface_hover())
+            .stroke(Stroke::new(1.0, border()))
+            .corner_radius(7.0)
+            .inner_margin(egui::Margin::symmetric(8, 4))
+            .show(ui, |ui| {
+                ui.add_enabled(
+                    !disabled,
+                    egui::TextEdit::singleline(&mut todos.draft)
+                        .hint_text(if disabled {
+                            "Limit reached"
+                        } else {
+                            "Add task"
+                        })
+                        .desired_width(input_width)
+                        .font(FontId::proportional(13.0))
+                        .frame(egui::Frame::NONE),
+                )
+            });
+        let add_clicked = todo_add_button(ui, disabled).clicked();
+        if (add_clicked
+            || (input.inner.lost_focus() && ui.input(|input| input.key_pressed(Key::Enter))))
+            && todos.add_draft()
+        {
+            ui.ctx().request_repaint();
+        }
+    });
+}
+
+fn todo_add_button(ui: &mut egui::Ui, disabled: bool) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(36.0, 30.0), Sense::click());
+    let hovered = response.hovered() || response.has_focus();
+    let fill = if disabled {
+        surface_primary()
+    } else if response.is_pointer_button_down_on() {
+        primary_button_fill(false, true)
+    } else if hovered {
+        primary_button_fill(true, false)
+    } else {
+        primary_button_fill(false, false)
+    };
+    ui.painter().rect(
+        rect,
+        7.0,
+        fill,
+        Stroke::new(1.0, if hovered { border_hover() } else { border() }),
+        egui::StrokeKind::Inside,
+    );
+    let color = if disabled {
+        text_disabled()
+    } else {
+        primary_button_text()
+    };
+    let center = rect.center();
+    ui.painter().line_segment(
+        [center + Vec2::new(-4.5, 0.0), center + Vec2::new(4.5, 0.0)],
+        Stroke::new(1.4, color),
+    );
+    ui.painter().line_segment(
+        [center + Vec2::new(0.0, -4.5), center + Vec2::new(0.0, 4.5)],
+        Stroke::new(1.4, color),
+    );
+    response
+        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, !disabled, "Add todo"));
+    response.on_hover_cursor(if disabled {
+        egui::CursorIcon::Default
+    } else {
+        egui::CursorIcon::PointingHand
+    })
+}
+
+fn paint_todo_icon(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
+    let stroke = Stroke::new(1.45, color);
+    painter.rect_stroke(rect, 4.0, stroke, egui::StrokeKind::Inside);
+    for offset in [4.5, 8.0, 11.5] {
+        let y = rect.top() + offset;
+        painter.line_segment(
+            [
+                egui::pos2(rect.left() + 6.5, y),
+                egui::pos2(rect.right() - 3.0, y),
+            ],
+            stroke,
+        );
+        painter.line_segment(
+            [
+                egui::pos2(rect.left() + 3.0, y),
+                egui::pos2(rect.left() + 4.4, y + 1.4),
+            ],
+            stroke,
+        );
+        painter.line_segment(
+            [
+                egui::pos2(rect.left() + 4.4, y + 1.4),
+                egui::pos2(rect.left() + 6.2, y - 1.6),
+            ],
+            stroke,
+        );
+    }
+}
+
+fn paint_todo_check(painter: &egui::Painter, center: egui::Pos2, color: Color32) {
+    painter.line_segment(
+        [
+            center + Vec2::new(-3.8, -0.2),
+            center + Vec2::new(-1.2, 2.6),
+        ],
+        Stroke::new(1.45, color),
+    );
+    painter.line_segment(
+        [center + Vec2::new(-1.2, 2.6), center + Vec2::new(4.2, -3.6)],
+        Stroke::new(1.45, color),
+    );
+}
+
+fn normalized_todo_text(text: &str) -> Option<String> {
+    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!normalized.is_empty()).then_some(compact_text(&normalized, 80))
 }
 
 fn minimum_codex_remaining_percent(snapshot: &CodexUsageSnapshot) -> Option<u8> {
@@ -2703,7 +3551,7 @@ fn paint_update_icon(ui: &mut egui::Ui, installing: bool) {
 
 fn update_version_badge(ui: &mut egui::Ui, version: &str) {
     egui::Frame::NONE
-        .fill(Color32::from_rgb(26, 26, 26))
+        .fill(surface_hover())
         .stroke(Stroke::new(1.0, border()))
         .corner_radius(4.0)
         .inner_margin(egui::Margin::symmetric(6, 2))
@@ -2726,15 +3574,9 @@ fn update_notice_button(ui: &mut egui::Ui, label: &str, primary: bool) -> egui::
     let pressed = response.is_pointer_button_down_on();
     let (fill, text, stroke) = if primary {
         (
-            if pressed {
-                Color32::from_rgb(205, 205, 205)
-            } else if hovered {
-                Color32::WHITE
-            } else {
-                text_primary()
-            },
-            Color32::BLACK,
-            Color32::WHITE,
+            primary_button_fill(hovered, pressed),
+            primary_button_text(),
+            primary_button_fill(false, false),
         )
     } else {
         (
@@ -2743,7 +3585,7 @@ fn update_notice_button(ui: &mut egui::Ui, label: &str, primary: bool) -> egui::
             } else if hovered {
                 surface_hover()
             } else {
-                Color32::BLACK
+                surface_primary()
             },
             text_primary(),
             if hovered { border_hover() } else { border() },
@@ -2913,8 +3755,8 @@ fn paint_palette_search_icon(ui: &mut egui::Ui) {
 
 fn palette_keycap(ui: &mut egui::Ui, label: &str) {
     egui::Frame::NONE
-        .fill(Color32::from_rgb(26, 26, 26))
-        .stroke(Stroke::new(1.0, Color32::from_rgb(46, 46, 46)))
+        .fill(surface_hover())
+        .stroke(Stroke::new(1.0, border()))
         .corner_radius(5.0)
         .inner_margin(egui::Margin::symmetric(7, 3))
         .show(ui, |ui| {
@@ -2947,15 +3789,15 @@ fn palette_command_row(ui: &mut egui::Ui, entry: &PaletteEntry, selected: bool) 
             row_rect,
             6.0,
             if response.is_pointer_button_down_on() {
-                Color32::from_rgb(31, 31, 31)
+                surface_active()
             } else {
-                Color32::from_rgb(26, 26, 26)
+                surface_hover()
             },
         );
         ui.painter().rect_stroke(
             row_rect,
             6.0,
-            Stroke::new(1.0, Color32::from_rgb(46, 46, 46)),
+            Stroke::new(1.0, border()),
             egui::StrokeKind::Inside,
         );
     }
@@ -2968,15 +3810,15 @@ fn palette_command_row(ui: &mut egui::Ui, entry: &PaletteEntry, selected: bool) 
         icon_rect,
         6.0,
         if selected {
-            Color32::from_rgb(41, 41, 41)
+            surface_active()
         } else {
-            Color32::from_rgb(26, 26, 26)
+            surface_hover()
         },
     );
     ui.painter().rect_stroke(
         icon_rect,
         6.0,
-        Stroke::new(1.0, Color32::from_rgb(46, 46, 46)),
+        Stroke::new(1.0, border()),
         egui::StrokeKind::Inside,
     );
     ui.painter().text(
@@ -3007,12 +3849,11 @@ fn palette_command_row(ui: &mut egui::Ui, entry: &PaletteEntry, selected: bool) 
             ),
             Vec2::new(key_width, 24.0),
         );
-        ui.painter()
-            .rect_filled(key_rect, 5.0, Color32::from_rgb(26, 26, 26));
+        ui.painter().rect_filled(key_rect, 5.0, surface_hover());
         ui.painter().rect_stroke(
             key_rect,
             5.0,
-            Stroke::new(1.0, Color32::from_rgb(46, 46, 46)),
+            Stroke::new(1.0, border()),
             egui::StrokeKind::Inside,
         );
         ui.painter().text(
@@ -3209,7 +4050,7 @@ fn compact_workspace_item(
             selection_rect,
             7.0,
             if active {
-                Color32::from_rgb(20, 20, 20)
+                surface_active()
             } else {
                 surface_hover()
             },
@@ -3271,7 +4112,7 @@ fn show_workspace_hover_card(ui: &egui::Ui, anchor: egui::Rect, workspace: &Work
             ui.set_width(width);
             ui.set_height(height);
             egui::Frame::NONE
-                .fill(Color32::from_rgb(10, 10, 10))
+                .fill(subtle_panel_fill())
                 .stroke(Stroke::new(1.0, vercel_border()))
                 .corner_radius(10.0)
                 .shadow(egui::epaint::Shadow {
@@ -3754,25 +4595,58 @@ fn paint_settings_version_footer(ui: &egui::Ui, sidebar_rect: egui::Rect, versio
 fn settings_section_content(
     ui: &mut egui::Ui,
     section: SettingsSection,
+    theme: &mut AppTheme,
     auto_expand_sidebar: &mut bool,
 ) {
-    if !matches!(section, SettingsSection::General) {
-        return;
+    match section {
+        SettingsSection::General => {
+            ui.label(
+                RichText::new("Sidebar")
+                    .font(FontId::proportional(14.0))
+                    .strong()
+                    .color(vercel_text_primary()),
+            );
+            ui.add_space(12.0);
+            settings_toggle_row(
+                ui,
+                "Auto expand sidebar",
+                "When enabled, hovering the collapsed sidebar opens the full workspace list.",
+                auto_expand_sidebar,
+            );
+        }
+        SettingsSection::Appearance => {
+            ui.label(
+                RichText::new("Theme")
+                    .font(FontId::proportional(14.0))
+                    .strong()
+                    .color(vercel_text_primary()),
+            );
+            ui.add_space(12.0);
+            settings_theme_row(ui, theme);
+        }
+        SettingsSection::Keyboard | SettingsSection::Advanced => {}
     }
+}
 
-    ui.label(
-        RichText::new("Sidebar")
-            .font(FontId::proportional(14.0))
-            .strong()
-            .color(vercel_text_primary()),
-    );
-    ui.add_space(12.0);
-    settings_toggle_row(
+fn settings_theme_row(ui: &mut egui::Ui, theme: &mut AppTheme) {
+    let mut light_mode = theme.is_light();
+    let response = settings_toggle_row(
         ui,
-        "Auto expand sidebar",
-        "When enabled, hovering the collapsed sidebar opens the full workspace list.",
-        auto_expand_sidebar,
+        "Light mode",
+        "Use Vercel-style light neutrals across terminals, sidebars, settings, command palette, todo, and focus.",
+        &mut light_mode,
     );
+    let next_theme = if light_mode {
+        AppTheme::Light
+    } else {
+        AppTheme::Dark
+    };
+    if next_theme != *theme {
+        *theme = next_theme;
+        configure_style(ui.ctx(), *theme);
+        ui.ctx().request_repaint();
+    }
+    response.on_hover_text(format!("Current theme: {}", theme.label()));
 }
 
 fn settings_toggle_row(
@@ -4035,18 +4909,15 @@ fn modal_primary_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
     response.widget_info(|| {
         egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
     });
-    let fill = if response.is_pointer_button_down_on() {
-        Color32::from_rgb(210, 210, 210)
-    } else if response.hovered() || response.has_focus() {
-        Color32::from_rgb(245, 245, 245)
-    } else {
-        text_primary()
-    };
+    let fill = primary_button_fill(
+        response.hovered() || response.has_focus(),
+        response.is_pointer_button_down_on(),
+    );
     ui.painter().rect(
         rect,
         6.0,
         fill,
-        Stroke::new(1.0, Color32::WHITE),
+        Stroke::new(1.0, primary_button_fill(false, false)),
         egui::StrokeKind::Inside,
     );
     ui.painter().text(
@@ -4054,7 +4925,7 @@ fn modal_primary_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
         egui::Align2::CENTER_CENTER,
         label,
         FontId::proportional(14.0),
-        Color32::BLACK,
+        primary_button_text(),
     );
     response
 }
@@ -4075,7 +4946,7 @@ fn modal_danger_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
         rect,
         6.0,
         fill,
-        Stroke::new(1.0, Color32::WHITE),
+        Stroke::new(1.0, danger()),
         egui::StrokeKind::Inside,
     );
     ui.painter().text(
@@ -5021,16 +5892,13 @@ fn terminal_pane_ui(
 }
 
 fn paint_terminal_footer(ui: &mut egui::Ui, rect: egui::Rect, active: bool, side_padding: f32) {
-    ui.painter().hline(
-        rect.x_range(),
-        rect.top(),
-        Stroke::new(1.0, Color32::from_rgb(38, 38, 38)),
-    );
+    ui.painter()
+        .hline(rect.x_range(), rect.top(), Stroke::new(1.0, border()));
 
     let key_color = if active {
-        Color32::from_rgb(190, 190, 190)
+        text_secondary()
     } else {
-        Color32::from_rgb(105, 105, 105)
+        text_disabled()
     };
     let baseline = egui::pos2(rect.left() + side_padding, rect.center().y);
     ui.painter().text(
@@ -5093,9 +5961,9 @@ fn paint_recent_command_suggestion(
     );
     let painter = ui.painter().with_clip_rect(content_rect);
     let muted = if active {
-        Color32::from_rgb(118, 118, 118)
+        text_disabled()
     } else {
-        Color32::from_rgb(78, 78, 78)
+        text_secondary().gamma_multiply(0.72)
     };
     painter.text(
         egui::pos2(rect.left(), rect.center().y),
@@ -5110,9 +5978,9 @@ fn paint_recent_command_suggestion(
         command,
         font,
         if response.hovered() && active {
-            Color32::from_rgb(205, 205, 205)
+            text_primary()
         } else {
-            Color32::from_rgb(145, 145, 145)
+            text_secondary()
         },
     );
     let key_rect = egui::Rect::from_center_size(
@@ -5122,8 +5990,8 @@ fn paint_recent_command_suggestion(
     painter.rect(
         key_rect,
         4.0,
-        Color32::from_rgb(13, 13, 13),
-        Stroke::new(1.0, Color32::from_rgb(67, 67, 67)),
+        surface_hover(),
+        Stroke::new(1.0, border_hover()),
         egui::StrokeKind::Inside,
     );
     painter.text(
@@ -5164,7 +6032,7 @@ fn paint_command_header(
     const ICON_TEXT_GAP: f32 = 6.0;
     const STAT_GAP: f32 = 16.0;
     let clip = ui.painter().with_clip_rect(header_rect.expand(1.0));
-    let separator = Stroke::new(1.0, Color32::from_rgb(38, 38, 38));
+    let separator = Stroke::new(1.0, border());
     clip.hline(header_rect.x_range(), header_rect.top(), separator);
     clip.hline(header_rect.x_range(), header_rect.bottom(), separator);
 
@@ -5193,12 +6061,8 @@ fn paint_command_header(
     paint_header_chip(
         &clip,
         path_rect,
-        Color32::BLACK,
-        if active {
-            Color32::from_rgb(72, 72, 72)
-        } else {
-            Color32::from_rgb(46, 46, 46)
-        },
+        surface_primary(),
+        if active { border_hover() } else { border() },
     );
     paint_folder_icon(
         &clip,
@@ -5232,11 +6096,7 @@ fn paint_command_header(
     let branch_label = compact_text(&git.branch, if remaining < 220.0 { 10 } else { 20 });
     let branch_text_width = ui.fonts_mut(|fonts| {
         fonts
-            .layout_no_wrap(
-                branch_label.clone(),
-                font.clone(),
-                Color32::from_rgb(151, 211, 142),
-            )
+            .layout_no_wrap(branch_label.clone(), font.clone(), git_green())
             .size()
             .x
     });
@@ -5245,13 +6105,8 @@ fn paint_command_header(
         egui::pos2(x, center_y - CHIP_HEIGHT / 2.0),
         Vec2::new(branch_width, CHIP_HEIGHT),
     );
-    paint_header_chip(
-        &clip,
-        branch_rect,
-        Color32::from_rgb(8, 18, 10),
-        Color32::from_rgb(35, 65, 39),
-    );
-    let git_green = Color32::from_rgb(151, 211, 142);
+    paint_header_chip(&clip, branch_rect, git_chip_fill(), git_chip_stroke());
+    let git_green = git_green();
     paint_git_branch_icon(
         &clip,
         egui::pos2(branch_rect.left() + 8.0, branch_rect.center().y),
@@ -5489,7 +6344,7 @@ fn terminal_layout_job(
                 TextFormat {
                     font_id: FontId::new(font_size, FontFamily::Monospace),
                     line_height: Some(cell_height),
-                    color: Color32::WHITE,
+                    color: text_primary(),
                     ..Default::default()
                 },
             );
@@ -5752,10 +6607,20 @@ fn shortcut(key: Key) -> KeyboardShortcut {
     KeyboardShortcut::new(Modifiers::CTRL | Modifiers::SHIFT, key)
 }
 
-fn configure_style(context: &egui::Context) {
+fn configure_style(context: &egui::Context, theme: AppTheme) {
+    LIGHT_THEME.store(theme.is_light(), Ordering::Relaxed);
     configure_fonts(context);
-    let mut style = (*context.style_of(egui::Theme::Dark)).clone();
-    style.visuals = egui::Visuals::dark();
+    let egui_theme = if theme.is_light() {
+        egui::Theme::Light
+    } else {
+        egui::Theme::Dark
+    };
+    let mut style = (*context.style_of(egui_theme)).clone();
+    style.visuals = if theme.is_light() {
+        egui::Visuals::light()
+    } else {
+        egui::Visuals::dark()
+    };
     style.visuals.panel_fill = terminal_background();
     style.visuals.window_fill = surface_primary();
     style.visuals.window_stroke = Stroke::new(1.0, border());
@@ -5776,8 +6641,12 @@ fn configure_style(context: &egui::Context) {
     style.visuals.widgets.active.bg_stroke = Stroke::new(1.0, text_disabled());
     style.visuals.widgets.active.corner_radius = 6.0.into();
     style.visuals.selection.bg_fill = Color32::from_rgb(0, 110, 254);
-    style.visuals.selection.stroke = Stroke::new(1.0, text_primary());
-    style.visuals.hyperlink_color = Color32::from_rgb(71, 168, 255);
+    style.visuals.selection.stroke = Stroke::new(1.0, Color32::WHITE);
+    style.visuals.hyperlink_color = if theme.is_light() {
+        Color32::from_rgb(0, 100, 210)
+    } else {
+        Color32::from_rgb(71, 168, 255)
+    };
     style.visuals.override_text_color = Some(text_primary());
     style.spacing.item_spacing = Vec2::new(8.0, 8.0);
     style.spacing.button_padding = Vec2::new(10.0, 6.0);
@@ -5803,7 +6672,8 @@ fn configure_style(context: &egui::Context) {
         egui::TextStyle::Monospace,
         FontId::new(14.0, FontFamily::Monospace),
     );
-    context.set_style_of(egui::Theme::Dark, style);
+    context.set_theme(egui_theme);
+    context.set_style_of(egui_theme, style);
 }
 
 fn configure_fonts(context: &egui::Context) {
@@ -5865,68 +6735,136 @@ fn configure_fonts(context: &egui::Context) {
     context.set_fonts(fonts);
 }
 
+fn is_light_theme() -> bool {
+    LIGHT_THEME.load(Ordering::Relaxed)
+}
+
 fn terminal_background() -> Color32 {
-    Color32::BLACK
+    if is_light_theme() {
+        Color32::WHITE
+    } else {
+        Color32::BLACK
+    }
 }
 
 fn vercel_bg() -> Color32 {
-    Color32::BLACK
+    if is_light_theme() {
+        Color32::WHITE
+    } else {
+        Color32::BLACK
+    }
 }
 
 fn vercel_surface() -> Color32 {
-    Color32::from_rgb(17, 17, 17)
+    if is_light_theme() {
+        Color32::from_rgb(250, 250, 250)
+    } else {
+        Color32::from_rgb(17, 17, 17)
+    }
 }
 
 fn vercel_surface_hover() -> Color32 {
-    Color32::from_rgb(24, 24, 24)
+    if is_light_theme() {
+        Color32::from_rgb(245, 245, 245)
+    } else {
+        Color32::from_rgb(24, 24, 24)
+    }
 }
 
 fn vercel_text_primary() -> Color32 {
-    Color32::from_rgb(250, 250, 250)
+    if is_light_theme() {
+        Color32::from_rgb(0, 0, 0)
+    } else {
+        Color32::from_rgb(250, 250, 250)
+    }
 }
 
 fn vercel_text_secondary() -> Color32 {
-    Color32::from_rgb(136, 136, 136)
+    if is_light_theme() {
+        Color32::from_rgb(102, 102, 102)
+    } else {
+        Color32::from_rgb(136, 136, 136)
+    }
 }
 
 fn vercel_border() -> Color32 {
-    Color32::from_rgb(51, 51, 51)
+    if is_light_theme() {
+        Color32::from_rgb(229, 229, 229)
+    } else {
+        Color32::from_rgb(51, 51, 51)
+    }
 }
 
 fn surface_primary() -> Color32 {
-    Color32::BLACK
+    if is_light_theme() {
+        Color32::WHITE
+    } else {
+        Color32::BLACK
+    }
 }
 
 fn surface_hover() -> Color32 {
-    Color32::from_rgb(26, 26, 26)
+    if is_light_theme() {
+        Color32::from_rgb(245, 245, 245)
+    } else {
+        Color32::from_rgb(26, 26, 26)
+    }
 }
 
 fn surface_active() -> Color32 {
-    Color32::from_rgb(31, 31, 31)
+    if is_light_theme() {
+        Color32::from_rgb(238, 238, 238)
+    } else {
+        Color32::from_rgb(31, 31, 31)
+    }
 }
 
 fn text_primary() -> Color32 {
-    Color32::from_rgb(237, 237, 237)
+    if is_light_theme() {
+        Color32::from_rgb(0, 0, 0)
+    } else {
+        Color32::from_rgb(237, 237, 237)
+    }
 }
 
 fn text_secondary() -> Color32 {
-    Color32::from_rgb(160, 160, 160)
+    if is_light_theme() {
+        Color32::from_rgb(102, 102, 102)
+    } else {
+        Color32::from_rgb(160, 160, 160)
+    }
 }
 
 fn text_disabled() -> Color32 {
-    Color32::from_rgb(143, 143, 143)
+    if is_light_theme() {
+        Color32::from_rgb(115, 115, 115)
+    } else {
+        Color32::from_rgb(143, 143, 143)
+    }
 }
 
 fn border() -> Color32 {
-    Color32::from_rgb(46, 46, 46)
+    if is_light_theme() {
+        Color32::from_rgb(229, 229, 229)
+    } else {
+        Color32::from_rgb(46, 46, 46)
+    }
 }
 
 fn border_hover() -> Color32 {
-    Color32::from_rgb(69, 69, 69)
+    if is_light_theme() {
+        Color32::from_rgb(171, 171, 171)
+    } else {
+        Color32::from_rgb(69, 69, 69)
+    }
 }
 
 fn terminal_divider_color() -> Color32 {
-    Color32::from_rgb(64, 64, 64)
+    if is_light_theme() {
+        Color32::from_rgb(214, 214, 214)
+    } else {
+        Color32::from_rgb(64, 64, 64)
+    }
 }
 
 fn danger() -> Color32 {
@@ -5935,6 +6873,64 @@ fn danger() -> Color32 {
 
 fn active_terminal_border() -> Color32 {
     Color32::from_rgb(0, 112, 243)
+}
+
+fn git_green() -> Color32 {
+    if is_light_theme() {
+        Color32::from_rgb(0, 128, 56)
+    } else {
+        Color32::from_rgb(151, 211, 142)
+    }
+}
+
+fn git_chip_fill() -> Color32 {
+    if is_light_theme() {
+        Color32::from_rgb(240, 253, 244)
+    } else {
+        Color32::from_rgb(8, 18, 10)
+    }
+}
+
+fn git_chip_stroke() -> Color32 {
+    if is_light_theme() {
+        Color32::from_rgb(187, 247, 208)
+    } else {
+        Color32::from_rgb(35, 65, 39)
+    }
+}
+
+fn subtle_panel_fill() -> Color32 {
+    if is_light_theme() {
+        Color32::from_rgb(250, 250, 250)
+    } else {
+        Color32::from_rgb(8, 8, 8)
+    }
+}
+
+fn primary_button_fill(hovered: bool, pressed: bool) -> Color32 {
+    if is_light_theme() {
+        if pressed {
+            Color32::from_rgb(23, 23, 23)
+        } else if hovered {
+            Color32::from_rgb(38, 38, 38)
+        } else {
+            Color32::BLACK
+        }
+    } else if pressed {
+        Color32::from_rgb(214, 214, 214)
+    } else if hovered {
+        Color32::WHITE
+    } else {
+        text_primary()
+    }
+}
+
+fn primary_button_text() -> Color32 {
+    if is_light_theme() {
+        Color32::WHITE
+    } else {
+        Color32::BLACK
+    }
 }
 
 fn ordered_selection(selection: TerminalSelection, columns: u16) -> (CellPosition, CellPosition) {
@@ -6264,7 +7260,13 @@ fn compact_text(text: &str, max_chars: usize) -> String {
 fn terminal_color(color: vt100::Color, background: bool) -> Color32 {
     match color {
         vt100::Color::Default if background => terminal_background(),
-        vt100::Color::Default => Color32::from_rgb(214, 218, 211),
+        vt100::Color::Default => {
+            if is_light_theme() {
+                Color32::from_rgb(23, 23, 23)
+            } else {
+                Color32::from_rgb(214, 218, 211)
+            }
+        }
         vt100::Color::Rgb(red, green, blue) => Color32::from_rgb(red, green, blue),
         vt100::Color::Idx(index) => indexed_color(index),
     }
@@ -6312,6 +7314,82 @@ fn indexed_color(index: u8) -> Color32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn todo_state_persists_only_incomplete_items() {
+        let mut todos = TodoListState::from_persisted(vec![
+            PersistedTodoItem {
+                text: "  ship   header ui  ".to_owned(),
+            },
+            PersistedTodoItem {
+                text: String::new(),
+            },
+        ]);
+        todos.draft = "write tests".to_owned();
+        assert!(todos.add_draft());
+        todos.items[0].completed_at = Some(Instant::now());
+
+        let persisted = todos.persisted_items();
+
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0].text, "write tests");
+    }
+
+    #[test]
+    fn completed_todos_disappear_after_grace_period() {
+        let now = Instant::now();
+        let mut todos = TodoListState {
+            items: vec![
+                TodoItem {
+                    text: "done".to_owned(),
+                    completed_at: Some(now),
+                },
+                TodoItem {
+                    text: "open".to_owned(),
+                    completed_at: None,
+                },
+            ],
+            ..TodoListState::default()
+        };
+
+        assert!(
+            !todos.purge_completed(
+                (now + TODO_COMPLETE_GRACE)
+                    .checked_sub(Duration::from_millis(1))
+                    .unwrap()
+            )
+        );
+        assert!(todos.purge_completed(now + TODO_COMPLETE_GRACE));
+        assert_eq!(todos.items.len(), 1);
+        assert_eq!(todos.items[0].text, "open");
+    }
+
+    #[test]
+    fn focus_timer_accumulates_and_tracks_best_session() {
+        let now = Instant::now();
+        let mut focus = FocusTimerState::from_persisted(15, 20);
+
+        focus.toggle(now);
+        assert_eq!(focus.elapsed_secs(now + Duration::from_secs(10)), 25);
+        focus.toggle(now + Duration::from_secs(10));
+
+        assert_eq!(focus.accumulated_secs, 25);
+        assert_eq!(focus.best_session_secs(now + Duration::from_secs(10)), 25);
+        assert!(!focus.running());
+    }
+
+    #[test]
+    fn focus_timer_reset_preserves_best_session() {
+        let now = Instant::now();
+        let mut focus = FocusTimerState::from_persisted(59, 10);
+
+        focus.toggle(now);
+        focus.reset(now + Duration::from_secs(2));
+
+        assert_eq!(focus.accumulated_secs, 0);
+        assert_eq!(focus.best_session_secs, 61);
+        assert!(!focus.running());
+    }
 
     #[test]
     fn reverse_terminal_selection_is_normalized() {
