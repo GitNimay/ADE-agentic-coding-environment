@@ -1,20 +1,28 @@
-<table>
-  <tr>
-    <td width="108" height="108" align="center" valign="middle">
-      <img src="crates/ade-app/assets/app-icon.png" alt="Termy logo" width="68" height="68" />
+<table width="100%">
+  <tr height="112">
+    <td width="112" height="112" align="center" valign="middle">
+      <img
+        src="crates/ade-app/assets/app-icon.png"
+        alt="Termy logo"
+        width="68"
+        height="68"
+      />
     </td>
-    <td valign="middle">
-      <h2>Termy</h2>
-      <p><small><strong>A Windows-first terminal workspace manager, built in Rust.</strong></small></p>
-      <p><small>Termy opens real PowerShell and Command Prompt sessions through Windows ConPTY, renders them in a GPU-accelerated desktop window, and keeps project work organized in persistent, folder-backed workspaces.</small></p>
-      <p>
-        <img alt="Rust" src="https://img.shields.io/badge/Rust-000000?style=flat-square&logo=rust&logoColor=white" />
-        <img alt="eframe" src="https://img.shields.io/badge/eframe-1F2937?style=flat-square&logo=egui&logoColor=white" />
-        <img alt="egui" src="https://img.shields.io/badge/egui-374151?style=flat-square&logo=egui&logoColor=white" />
-        <img alt="wgpu" src="https://img.shields.io/badge/wgpu-2563EB?style=flat-square&logoColor=white" />
-        <img alt="Windows ConPTY" src="https://img.shields.io/badge/Windows_ConPTY-0078D4?style=flat-square&logo=windows11&logoColor=white" />
-        <img alt="SQLite" src="https://img.shields.io/badge/SQLite-003B57?style=flat-square&logo=sqlite&logoColor=white" />
-      </p>
+
+    <td width="100%" valign="middle">
+      <strong>Termy</strong><br />
+      <sub>
+        <strong>A focused Windows terminal workspace, engineered in Rust.</strong><br />
+        Run PowerShell and Command Prompt through ConPTY with persistent project workspaces.
+      </sub>
+      <br /><br />
+
+      <img alt="Rust" src="https://img.shields.io/badge/Rust-000000?style=flat-square&logo=rust&logoColor=white" />
+      <img alt="eframe" src="https://img.shields.io/badge/eframe-1F2937?style=flat-square&logo=egui&logoColor=white" />
+      <img alt="egui" src="https://img.shields.io/badge/egui-374151?style=flat-square&logo=egui&logoColor=white" />
+      <img alt="wgpu" src="https://img.shields.io/badge/wgpu-2563EB?style=flat-square&logoColor=white" />
+      <img alt="Windows ConPTY" src="https://img.shields.io/badge/Windows_ConPTY-0078D4?style=flat-square&logo=windows11&logoColor=white" />
+      <img alt="SQLite" src="https://img.shields.io/badge/SQLite-003B57?style=flat-square&logo=sqlite&logoColor=white" />
     </td>
   </tr>
 </table>
