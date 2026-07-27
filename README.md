@@ -27,12 +27,26 @@
 
 ## Features
 
-- **Project workspaces:** Keep named folders, panes, and working context together.
-- **Real Windows terminals:** Run PowerShell, PowerShell Core, or Command Prompt through ConPTY.
-- **Split panes:** Arrange up to six live terminals in one workspace.
-- **Session continuity:** Keep shells running after the desktop window closes.
-- **Persistent state:** Restore layouts, panes, Git context, and recent terminal output.
-- **Fast desktop UI:** Render terminal cells through `eframe`, `egui`, and `wgpu`.
+<dl>
+  <dt><strong>Project workspaces</strong></dt>
+  <dd>Keep named folders, panes, and working context together.</dd>
+
+  <dt><strong>Real Windows terminals</strong></dt>
+  <dd>Run <a href="https://learn.microsoft.com/en-us/powershell/scripting/what-is-windows-powershell">Windows PowerShell</a>, <a href="https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_powershell_editions">PowerShell Core</a>, or <a href="https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/cmd">Command Prompt</a> through <a href="https://learn.microsoft.com/en-us/windows/console/pseudoconsoles">ConPTY</a>.</dd>
+
+  <dt><strong>Split panes</strong></dt>
+  <dd>Arrange up to six live terminals in one workspace.</dd>
+
+  <dt><strong>Session continuity</strong></dt>
+  <dd>Keep shells running after the desktop window closes.</dd>
+
+  <dt><strong>Persistent state</strong></dt>
+  <dd>Restore layouts, panes, <a href="https://git-scm.com/docs">Git</a> context, and recent terminal output.</dd>
+
+  <dt><strong>Fast desktop UI</strong></dt>
+  <dd>Render terminal cells through <a href="https://docs.rs/eframe/latest/eframe/"><code>eframe</code></a>, <a href="https://docs.rs/egui/latest/egui/"><code>egui</code></a>, and <a href="https://docs.rs/wgpu/latest/wgpu/"><code>wgpu</code></a>.</dd>
+</dl>
+
 
 ## Installation
 
@@ -41,8 +55,6 @@
 1. Download the latest Windows build: [windows-x64-termy.exe](https://github.com/GitNimay/ADE-agentic-coding-environment/releases/latest/download/windows-x64-termy.exe).
 2. Move the executable to a permanent folder.
 3. Run `windows-x64-termy.exe`.
-
-Termy currently targets Windows 11 x64. The standalone build is unsigned, so Windows SmartScreen may show an unknown publisher warning.
 
 ### Manual Installation
 
@@ -55,18 +67,14 @@ cargo build -p ade-app
 .\target\debug\ade-app.exe
 ```
 
-Requirements:
+## Quick summary
 
-- Windows 11 x64
-- Rust 1.95 or newer
-- Git
+Explore project capabilities in the [feature guide](docs/features.md).
+Review system design in the [architecture notes](docs/architecture.md).
 
-## Documentation
+Follow the [release process](docs/releasing.md) to publish updates.
+Keep releases clear and consistent.
 
-- [Feature guide](docs/features.md)
-- [Architecture notes](docs/architecture.md)
-- [Release process](docs/releasing.md)
+<sub>Licensed under **MIT.** **Built by [Nimesh](https://www.n1m35h.in/).**</sub>
 
----
 
-<sub>Licensed under MIT OR Apache-2.0. Built by [Nimesh](https://www.n1m35h.in/).</sub>
