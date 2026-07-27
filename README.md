@@ -2,10 +2,9 @@
   <img align="left" src="./crates/ade-app/assets/app-icon.png" alt="Termy logo" width="76" />
 </a>
 <p>
-  <strong>Termy</strong><br />
+  <big><strong>Termy</strong></big><br />
   <strong>A focused Windows terminal workspace, engineered in <a href="https://www.rust-lang.org/">Rust</a>.</strong> Run <a href="https://learn.microsoft.com/en-us/powershell/scripting/what-is-windows-powershell">Windows PowerShell</a> and <a href="https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/cmd">Command Prompt</a> through <a href="https://learn.microsoft.com/en-us/windows/console/pseudoconsoles">ConPTY</a> with persistent project workspaces, split panes, restored layouts, and recent terminal context.
-</p>
-<p>
+  <br />
   Termy uses <a href="https://docs.rs/eframe/latest/eframe/">eframe</a>, <a href="https://docs.rs/egui/latest/egui/">egui</a>, <a href="https://docs.rs/wgpu/latest/wgpu/">wgpu</a>, and SQLite-backed state to keep desktop terminal sessions fast, local, and easy to resume. Start with the <a href="docs/features.md">feature guide</a> or review the <a href="docs/architecture.md">architecture notes</a>.
 </p>
 
@@ -19,7 +18,6 @@
 </p>
 
 <br clear="left" />
-
 
 ## <sub>Demo</sub>
 
