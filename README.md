@@ -28,15 +28,10 @@
 ## Features
 
 **Project workspaces:**  Keep named folders, panes, and working context together.
-
 **Real Windows terminals:** Run [Windows PowerShell](https://learn.microsoft.com/en-us/powershell/scripting/what-is-windows-powershell), [PowerShell Core](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_powershell_editions), or [Command Prompt](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/cmd) through [ConPTY](https://learn.microsoft.com/en-us/windows/console/pseudoconsoles).
-
 **Split panes:** Arrange up to six live terminals in one workspace.
-
 **Session continuity:** Keep shells running after the desktop window closes.
-
 **Persistent state:** Restore layouts, panes, [Git](https://git-scm.com/docs) context, and recent terminal output.
-
 **Fast desktop UI:** Render terminal cells through [`eframe`](https://docs.rs/eframe/latest/eframe/), [`egui`](https://docs.rs/egui/latest/egui/), and [`wgpu`](https://docs.rs/wgpu/latest/wgpu/).
 
 ## Installation
