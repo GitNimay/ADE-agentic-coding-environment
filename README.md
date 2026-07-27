@@ -17,8 +17,6 @@
   <img alt="SQLite" src="https://img.shields.io/badge/SQLite-003B57?style=flat-square&logo=sqlite&logoColor=white" />
 </p>
 
-<br clear="left" />
-
 ## <sub>Demo</sub>
 
 <p align="center">
