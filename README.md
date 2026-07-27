@@ -19,14 +19,6 @@
   </tr>
 </table>
 
-<p>
-  <a href="https://github.com/GitNimay/ADE-agentic-coding-environment/releases/latest/download/windows-x64-termy.exe">
-    <img alt="Download for Windows" src="https://img.shields.io/badge/Download-Windows_x64-111111?style=for-the-badge&logo=windows11&logoColor=white" />
-  </a>
-  <img alt="Rust" src="https://img.shields.io/badge/Rust-1.95%2B-B7410E?style=for-the-badge&logo=rust&logoColor=white" />
-  <img alt="Platform" src="https://img.shields.io/badge/Platform-Windows_11-0A66C2?style=for-the-badge&logo=windows11&logoColor=white" />
-</p>
-
 ## Demo
 
 <a href="docs/assets/termy-demo.mp4">
