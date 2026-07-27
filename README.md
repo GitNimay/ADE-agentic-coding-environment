@@ -1,16 +1,18 @@
-<p align="center">
-  <img src="./crates/ade-app/assets/app-icon.png" alt="Termy logo" width="92" />
+<a href="https://github.com/GitNimay/ADE-agentic-coding-environment">
+  <img align="left" src="./crates/ade-app/assets/app-icon.png" alt="Termy logo" width="76" />
+</a>
+
+<h3>Termy</h3>
+
+<p>
+  <sub><strong>A focused Windows terminal workspace, engineered in <a href="https://www.rust-lang.org/">Rust</a>.</strong> Run <a href="https://learn.microsoft.com/en-us/powershell/scripting/what-is-windows-powershell">Windows PowerShell</a> and <a href="https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/cmd">Command Prompt</a> through <a href="https://learn.microsoft.com/en-us/windows/console/pseudoconsoles">ConPTY</a> with persistent project workspaces, split panes, restored layouts, and recent terminal context.</sub>
 </p>
 
-<h1 align="center">Termy</h1>
-
-<h3 align="center">A focused Windows terminal workspace, engineered in Rust.</h3>
-
-<p align="center">
-  <sub>Run PowerShell and Command Prompt through ConPTY with persistent project workspaces.</sub>
+<p>
+  <sub>Termy uses <a href="https://docs.rs/eframe/latest/eframe/">eframe</a>, <a href="https://docs.rs/egui/latest/egui/">egui</a>, <a href="https://docs.rs/wgpu/latest/wgpu/">wgpu</a>, and SQLite-backed state to keep desktop terminal sessions fast, local, and easy to resume. Start with the <a href="docs/features.md">feature guide</a> or review the <a href="docs/architecture.md">architecture notes</a>.</sub>
 </p>
 
-<p align="center">
+<p>
   <img alt="Rust" src="https://img.shields.io/badge/Rust-000000?style=flat-square&logo=rust&logoColor=white" />
   <img alt="eframe" src="https://img.shields.io/badge/eframe-1F2937?style=flat-square&logo=egui&logoColor=white" />
   <img alt="egui" src="https://img.shields.io/badge/egui-374151?style=flat-square&logo=egui&logoColor=white" />
@@ -18,6 +20,8 @@
   <img alt="Windows ConPTY" src="https://img.shields.io/badge/Windows_ConPTY-0078D4?style=flat-square&logo=windows11&logoColor=white" />
   <img alt="SQLite" src="https://img.shields.io/badge/SQLite-003B57?style=flat-square&logo=sqlite&logoColor=white" />
 </p>
+
+<br clear="left" />
 
 
 ## <sub>Demo</sub>
