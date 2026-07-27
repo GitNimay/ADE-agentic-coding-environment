@@ -1,12 +1,12 @@
 <table>
   <tr>
-    <td width="132" align="center">
-      <img src="crates/ade-app/assets/app-icon.png" alt="Termy logo" width="76" />
+    <td width="108" height="108" align="center" valign="middle">
+      <img src="crates/ade-app/assets/app-icon.png" alt="Termy logo" width="68" height="68" />
     </td>
-    <td>
-      <h1>Termy</h1>
-      <p><strong>A Windows-first terminal workspace manager, built in Rust.</strong></p>
-      <p>Termy opens real PowerShell and Command Prompt sessions through Windows ConPTY, renders them in a GPU-accelerated desktop window, and keeps project work organized in persistent, folder-backed workspaces.</p>
+    <td valign="middle">
+      <h2>Termy</h2>
+      <p><small><strong>A Windows-first terminal workspace manager, built in Rust.</strong></small></p>
+      <p><small>Termy opens real PowerShell and Command Prompt sessions through Windows ConPTY, renders them in a GPU-accelerated desktop window, and keeps project work organized in persistent, folder-backed workspaces.</small></p>
       <p>
         <img alt="Rust" src="https://img.shields.io/badge/Rust-000000?style=flat-square&logo=rust&logoColor=white" />
         <img alt="eframe" src="https://img.shields.io/badge/eframe-1F2937?style=flat-square&logo=egui&logoColor=white" />
@@ -18,6 +18,7 @@
     </td>
   </tr>
 </table>
+
 
 ## Demo
 
