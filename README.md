@@ -27,26 +27,17 @@
 
 ## Features
 
-<dl>
-  <dt><strong>Project workspaces</strong></dt>
-  <dd>Keep named folders, panes, and working context together.</dd>
+**Project workspaces:**  Keep named folders, panes, and working context together.
 
-  <dt><strong>Real Windows terminals</strong></dt>
-  <dd>Run <a href="https://learn.microsoft.com/en-us/powershell/scripting/what-is-windows-powershell">Windows PowerShell</a>, <a href="https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_powershell_editions">PowerShell Core</a>, or <a href="https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/cmd">Command Prompt</a> through <a href="https://learn.microsoft.com/en-us/windows/console/pseudoconsoles">ConPTY</a>.</dd>
+**Real Windows terminals:** Run [Windows PowerShell](https://learn.microsoft.com/en-us/powershell/scripting/what-is-windows-powershell), [PowerShell Core](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_powershell_editions), or [Command Prompt](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/cmd) through [ConPTY](https://learn.microsoft.com/en-us/windows/console/pseudoconsoles).
 
-  <dt><strong>Split panes</strong></dt>
-  <dd>Arrange up to six live terminals in one workspace.</dd>
+**Split panes:** Arrange up to six live terminals in one workspace.
 
-  <dt><strong>Session continuity</strong></dt>
-  <dd>Keep shells running after the desktop window closes.</dd>
+**Session continuity:** Keep shells running after the desktop window closes.
 
-  <dt><strong>Persistent state</strong></dt>
-  <dd>Restore layouts, panes, <a href="https://git-scm.com/docs">Git</a> context, and recent terminal output.</dd>
+**Persistent state:** Restore layouts, panes, [Git](https://git-scm.com/docs) context, and recent terminal output.
 
-  <dt><strong>Fast desktop UI</strong></dt>
-  <dd>Render terminal cells through <a href="https://docs.rs/eframe/latest/eframe/"><code>eframe</code></a>, <a href="https://docs.rs/egui/latest/egui/"><code>egui</code></a>, and <a href="https://docs.rs/wgpu/latest/wgpu/"><code>wgpu</code></a>.</dd>
-</dl>
-
+**Fast desktop UI:** Render terminal cells through [`eframe`](https://docs.rs/eframe/latest/eframe/), [`egui`](https://docs.rs/egui/latest/egui/), and [`wgpu`](https://docs.rs/wgpu/latest/wgpu/).
 
 ## Installation
 
