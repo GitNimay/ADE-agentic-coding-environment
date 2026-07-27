@@ -1,7 +1,7 @@
 <table width="100%">
   <tr height="112">
     <td width="112" height="112" align="center" valign="middle">
-      <img src="crates/ade-app/assets/app-icon.png" alt="Termy logo" width="68" height="68" />
+      <img src="https://raw.githubusercontent.com/GitNimay/ADE-agentic-coding-environment/main/crates/ade-app/assets/app-icon.png" alt="Termy logo" width="68" height="68" />
     </td>
     <td width="100%" valign="middle">
       <strong>Termy</strong><br />
@@ -21,32 +21,34 @@
 </table>
 
 
-## Demo
+## <sub>Demo</sub>
 
-<a href="docs/assets/termy-demo.mp4">
-  <img src="docs/assets/termy-demo.gif" alt="Termy demo video preview" width="760" />
-</a>
+<p align="center">
+  <a href="docs/assets/termy-demo.mp4">
+    <img src="docs/assets/termy-demo.gif" alt="Termy demo video preview" width="680" />
+  </a>
+</p>
 
-## Features
+## <sub>Features</sub>
 
-**Project workspaces:**  Keep named folders, panes, and working context together.\
-**Real Windows terminals:** Run [Windows PowerShell](https://learn.microsoft.com/en-us/powershell/scripting/what-is-windows-powershell), [PowerShell Core](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_powershell_editions), or [Command Prompt](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/cmd) through [ConPTY](https://learn.microsoft.com/en-us/windows/console/pseudoconsoles).\
-**Split panes:** Arrange up to six live terminals in one workspace.\
-**Session continuity:** Keep shells running after the desktop window closes.\
-**Persistent state:** Restore layouts, panes, [Git](https://git-scm.com/docs) context, and recent terminal output.\
-**Fast desktop UI:** Render terminal cells through [`eframe`](https://docs.rs/eframe/latest/eframe/), [`egui`](https://docs.rs/egui/latest/egui/), and [`wgpu`](https://docs.rs/wgpu/latest/wgpu/).
+<sub><strong>Project workspaces:</strong> Keep named folders, panes, and working context together.</sub>\
+<sub><strong>Real Windows terminals:</strong> Run <a href="https://learn.microsoft.com/en-us/powershell/scripting/what-is-windows-powershell">Windows PowerShell</a>, <a href="https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_powershell_editions">PowerShell Core</a>, or <a href="https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/cmd">Command Prompt</a> through <a href="https://learn.microsoft.com/en-us/windows/console/pseudoconsoles">ConPTY</a>.</sub>\
+<sub><strong>Split panes:</strong> Arrange up to six live terminals in one workspace.</sub>\
+<sub><strong>Session continuity:</strong> Keep shells running after the desktop window closes.</sub>\
+<sub><strong>Persistent state:</strong> Restore layouts, panes, <a href="https://git-scm.com/docs">Git</a> context, and recent terminal output.</sub>\
+<sub><strong>Fast desktop UI:</strong> Render terminal cells through <code>eframe</code>, <code>egui</code>, and <code>wgpu</code>.</sub>
 
-## Installation
+## <sub>Installation</sub>
 
-### Download
+### <sub>Download</sub>
 
-1. Download the latest Windows build: [windows-x64-termy.exe](https://github.com/GitNimay/ADE-agentic-coding-environment/releases/latest/download/windows-x64-termy.exe).
-2. Move the executable to a permanent folder.
-3. Run `windows-x64-termy.exe`.
+1. <sub>Download the latest Windows build: <a href="https://github.com/GitNimay/ADE-agentic-coding-environment/releases/latest/download/windows-x64-termy.exe">windows-x64-termy.exe</a>.</sub>
+2. <sub>Move the executable to a permanent folder.</sub>
+3. <sub>Run <code>windows-x64-termy.exe</code>.</sub>
 
-### Manual Installation
+### <sub>Manual Installation</sub>
 
-Clone the repository, build the desktop app, then run it locally:
+<sub>Clone the repository, build the desktop app, then run it locally:</sub>
 
 ```powershell
 git clone https://github.com/GitNimay/ADE-agentic-coding-environment.git
@@ -55,13 +57,12 @@ cargo build -p ade-app
 .\target\debug\ade-app.exe
 ```
 
-## Quick summary
+## <sub>Quick summary</sub>
 
-Explore project capabilities in the [feature guide](docs/features.md).
-Review system design in the [architecture notes](docs/architecture.md).
+<sub>Explore project capabilities in the <a href="docs/features.md">feature guide</a>.</sub>
+<sub>Review system design in the <a href="docs/architecture.md">architecture notes</a>.</sub>
 
-Follow the [release process](docs/releasing.md) to publish updates.
-Keep releases clear and consistent.
+<sub>Follow the <a href="docs/releasing.md">release process</a> to publish updates.</sub>
+<sub>Keep releases clear and consistent.</sub>
 
-<sub>Licensed under **MIT.** **Built by [Nimesh](https://www.n1m35h.in/).**</sub>
-
+<sub>Licensed under <strong>MIT.</strong> <strong>Built by <a href="https://www.n1m35h.in/">Nimesh</a>.</strong></sub>
