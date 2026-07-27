@@ -1,14 +1,8 @@
 <table width="100%">
   <tr height="112">
     <td width="112" height="112" align="center" valign="middle">
-      <img
-        src="crates/ade-app/assets/app-icon.png"
-        alt="Termy logo"
-        width="68"
-        height="68"
-      />
+      <img src="crates/ade-app/assets/app-icon.png" alt="Termy logo" width="68" height="68" />
     </td>
-
     <td width="100%" valign="middle">
       <strong>Termy</strong><br />
       <sub>
@@ -16,7 +10,6 @@
         Run PowerShell and Command Prompt through ConPTY with persistent project workspaces.
       </sub>
       <br /><br />
-
       <img alt="Rust" src="https://img.shields.io/badge/Rust-000000?style=flat-square&logo=rust&logoColor=white" />
       <img alt="eframe" src="https://img.shields.io/badge/eframe-1F2937?style=flat-square&logo=egui&logoColor=white" />
       <img alt="egui" src="https://img.shields.io/badge/egui-374151?style=flat-square&logo=egui&logoColor=white" />
@@ -71,5 +64,4 @@ Follow the [release process](docs/releasing.md) to publish updates.
 Keep releases clear and consistent.
 
 <sub>Licensed under **MIT.** **Built by [Nimesh](https://www.n1m35h.in/).**</sub>
-
 
